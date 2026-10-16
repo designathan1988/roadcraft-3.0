@@ -198,6 +198,13 @@ describe('a shaping pass off the page', () => {
     same(offThePage(boxes), here);
   });
 
+  it('takes an empty box among the asked ones as no corner, not as the corner 0, 0', () => {
+    const empty = boxRegion(grid, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity } as never);
+    const plate = askPlate(grid, natural, [...regions.slice(0, 3), empty]);
+    expect(plate.natural.length).toBe(askPlate(grid, natural, regions.slice(0, 3)).natural.length);
+    same(offThePage([...regions.slice(0, 3), empty]), onThePage(regions.slice(0, 3)));
+  });
+
   it('digests two solves block by block as the page does', () => {
     // The land raised under a part of the town: the roads there solved again.
     const raised = (x: number, y: number): number => groundAt(x, y) + (Math.hypot(x - m(150), y + m(100)) < m(260) ? m(2.5) : 0);

@@ -43,8 +43,10 @@ export function askPlate(grid: CornerGrid, natural: Float64Array, regions: reado
   let count = 0;
   regions.forEach((r, k) => {
     const x0 = Math.max(0, r[0]), x1 = Math.min(n - 1, r[1]), y0 = Math.max(0, r[2]), y1 = Math.min(n - 1, r[3]);
-    clamped[k * 4] = x0; clamped[k * 4 + 1] = x1; clamped[k * 4 + 2] = y0; clamped[k * 4 + 3] = y1;
-    if (x1 >= x0 && y1 >= y0) count += (x1 - x0 + 1) * (y1 - y0 + 1);
+    // DO NOT store an empty region as it is: an empty box's infinities became 0..0 in the integers, a corner never counted.
+    const empty = !(x1 >= x0 && y1 >= y0);
+    clamped[k * 4] = empty ? 1 : x0; clamped[k * 4 + 1] = empty ? 0 : x1; clamped[k * 4 + 2] = empty ? 1 : y0; clamped[k * 4 + 3] = empty ? 0 : y1;
+    if (!empty) count += (x1 - x0 + 1) * (y1 - y0 + 1);
   });
   // Regions over as many corners as the plate has: the plate's corners once.
   const whole = count >= n * n;
