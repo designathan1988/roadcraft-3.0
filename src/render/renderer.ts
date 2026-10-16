@@ -60,7 +60,7 @@ import { DEFAULT_ATMOSPHERE, createPostChain, type Atmosphere, type PostChain } 
 import { createInspector, type Inspector } from './inspector';
 import { buildRoadSurfaces, disposeSurfaceReuse, roadSurfaceSteps, storedKey, type RoadSurfaces, type SurfaceReuse, type TileBundle } from './roadSurfaces';
 import { SurfaceInputs } from './roadSurfaceInputs';
-import { forgetDerivedKeys, forgetOtherDerived, readDerivedAll, writeDerivedMany } from './derivedCache';
+import { forgetDerivedKeys, forgetOtherDerived, readDerivedKeys, readDerivedMany, writeDerivedMany } from './derivedCache';
 import { disposeMesh } from './mesh/surfaceMesh';
 import { RoadTilePool } from './roadTilePool';
 import { GroundShapePool } from './groundShapePool';
@@ -587,7 +587,7 @@ export function createSceneRenderer(
 
   // What each rebuild keeps for the next
   const tilesPrefix = ROAD_TILES_HASH ? `roadtiles:${ROAD_TILES_HASH}:` : null;
-  /** The kept tiles have been read (or there are none to read). */
+  /** The kept tiles' keys have been read (or there are none to read). */
   let storedRead = tilesPrefix === null;
   /** What the store holds now, by `storedKey`. */
   const storedKeys = new Set<string>();
@@ -608,7 +608,8 @@ export function createSceneRenderer(
     chunks: new Map(),
     inputs: new SurfaceInputs(),
     retired: [],
-    stored: new Map(),
+    // The store's keys known from the start (`readDerivedKeys`); a build reads the tiles it needs by them.
+    ...(tilesPrefix ? { stored: { has: (key: string) => storedKeys.has(key), read: (keys: readonly string[]) => readDerivedMany<TileBundle>(tilesPrefix, keys) } } : {}),
     // DO NOT hold the built tiles for idle writes
     keep: (key, bundle) => {
       if (!tilesPrefix || storedKeys.has(key)) return;
@@ -625,16 +626,12 @@ export function createSceneRenderer(
   };
   if (tilesPrefix && ROAD_TILES_HASH) {
     forgetOtherDerived('roadtiles', ROAD_TILES_HASH);
-    void readDerivedAll<TileBundle>(tilesPrefix).then((kept) => {
-      for (const [key, bundle] of kept) {
-        surfaceReuse.stored!.set(key, bundle);
-        storedKeys.add(key);
-      }
+    void readDerivedKeys(tilesPrefix).then((kept) => {
+      for (const key of kept) storedKeys.add(key);
     }).finally(() => { storedRead = true; });
   }
   /** After a build: the store made to hold the network just built - its new tiles written as they were built */
   const keepTiles = (): void => {
-    surfaceReuse.stored!.clear();
     if (!tilesPrefix) return;
     const current = new Set<string>();
     for (const [pass, tiles] of surfaceReuse.tiles) for (const digest of tiles.keys()) current.add(storedKey(pass, digest));
@@ -1496,7 +1493,7 @@ export function createSceneRenderer(
     pendingBlocks = [];
     worldJobGround = false;
     yield;
-    // The tiles kept from the last session, read while the game started: a sliced build waits for them a little
+    // The keys of the tiles kept from the last session, read while the game started: a sliced build waits for them a little
     if (sliced && !storedRead) {
       const since = performance.now();
       while (!storedRead && performance.now() - since < KEPT_TILES_WAIT_MS) yield 'wait';

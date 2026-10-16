@@ -6,11 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { RoadDoc } from '@world/doc';
 import { m } from '@world/units';
 import { Network } from '@world/network';
-import { buildRoadElevation } from '@world/elevation';
+import { buildRoadElevation, type RoadElevation } from '@world/elevation';
 import { planCity, DEFAULT_CITY } from '@world/cityGen/plan';
 import { layCity } from '@editor/cityGenerator';
 import type { SceneMaterials } from '@render/materials';
-import { buildRoadSurfaces, roadSurfaceSteps, type RoadSurfaces, type SurfaceReuse } from '@render/roadSurfaces';
+import { buildRoadSurfaces, roadSurfaceSteps, type RoadSurfaces, type SurfaceReuse, type TileBundle } from '@render/roadSurfaces';
 import { SurfaceInputs, surfaceInputWork } from '@render/roadSurfaceInputs';
 import type { NodeId, SegmentId } from '@world/ids';
 import { generateBody } from '@world/buildings/blueprints';
@@ -89,9 +89,9 @@ function authored(): RoadDoc {
   return RoadDoc.fromJSON(file.document as never);
 }
 
-async function stepped(net: Network, tiler: RoadTiler, groundMaterial?: MeshBasicMaterial): Promise<RoadSurfaces> {
+async function stepped(net: Network, tiler: RoadTiler, groundMaterial?: MeshBasicMaterial, reuse?: (elevation: RoadElevation) => SurfaceReuse): Promise<RoadSurfaces> {
   const elevation = buildRoadElevation(net, ground);
-  const steps = roadSurfaceSteps(net, elevation, materials, ground, undefined, groundMaterial, tiler);
+  const steps = roadSurfaceSteps(net, elevation, materials, ground, reuse?.(elevation), groundMaterial, tiler);
   for (;;) {
     const step = steps.next();
     if (step.done) { step.value.adopt(); return step.value; }
@@ -134,6 +134,33 @@ describe('road surface tiles made off the page', () => {
       for (let i = 0; i < position.count; i++) expect(sphere.distanceToPoint(p.fromBufferAttribute(position as never, i))).toBeLessThanOrEqual(1e-3);
     });
     expect(blocks).toBeGreaterThan(0);
+  });
+});
+
+/** THE TILES KEPT BETWEEN SESSIONS (`derivedCache.ts`): read by the keys a build needs, never the whole store */
+describe('road surface tiles kept from an earlier session', () => {
+  it('reads only the tiles the build needs, and draws them byte for byte as built', async () => {
+    const net = new Network(RoadDoc.fromJSON(JSON.parse(readFileSync('tests/fixtures/grid-and-bends.json', 'utf8')).document));
+    net.rebuild();
+    const store = new Map<string, TileBundle>();
+    const fresh = (elevation: RoadElevation): SurfaceReuse => ({
+      tiles: new Map(), dependsOn: (minX, minY, maxX, maxY) => elevation.digest(minX, minY, maxX, maxY), paint: new Map(), chunks: new Map(),
+    });
+    const first = await stepped(net, workerTiler(), undefined, (elevation) => ({ ...fresh(elevation), keep: (key, bundle) => { store.set(key, bundle); } }));
+    expect(store.size).toBe(first.built);
+    // Another map's tiles in the store too: never read.
+    for (let k = 0; k < 50; k++) store.set(`other|${k}`, new Map());
+    const asked: string[] = [];
+    const tiler = workerTiler();
+    const again = await stepped(net, tiler, undefined, (elevation) => ({ ...fresh(elevation), stored: {
+      has: (key) => store.has(key),
+      read: (keys) => { asked.push(...keys); return Promise.resolve(new Map(keys.map((key) => [key, store.get(key)!]))); },
+    } }));
+    expect(tiler.asked).toBe(0);
+    expect(again.built).toBe(0);
+    expect(asked.length).toBe(first.built);
+    expect(asked.some((key) => key.startsWith('other|'))).toBe(false);
+    expect(bytesOf(again.group)).toBe(bytesOf(first.group));
   });
 });
 

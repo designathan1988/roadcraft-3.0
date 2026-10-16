@@ -66,12 +66,19 @@ export interface SurfaceReuse {
   readonly retired?: Mesh[];
   /** Whether a block at (x, y), world units, is near the camera: made at full detail, its far level hidden */
   readonly near?: (x: number, y: number) => boolean;
-  /** Tiles kept from an earlier session (`derivedCache.ts`), by `storedKey` */
-  readonly stored?: Map<string, TileBundle>;
+  /** Tiles kept from an earlier session (`derivedCache.ts`), by `storedKey`: read as a build needs them, never the whole store */
+  readonly stored?: StoredTiles;
   /** The passes' inputs, kept road by road and node by node between builds (`roadSurfaceInputs.ts`) */
   readonly inputs?: SurfaceInputs;
   /** Each tile built afresh, to be kept for a later session */
   readonly keep?: (key: string, bundle: TileBundle) => void;
+}
+
+/** The tiles kept from an earlier session: which keys the store holds, and a read of some of them. */
+interface StoredTiles {
+  has(key: string): boolean;
+  /** These tiles; a key the store no longer holds is left out. */
+  read(keys: readonly string[]): Promise<ReadonlyMap<string, TileBundle>>;
 }
 
 /** The box round a block's tiles' rectangles, [minX, minY, maxX, maxY]. */
@@ -339,6 +346,8 @@ export function* roadSurfaceSteps(
     const kept = new Map<number, KeptTile>();
     /** The tiles in tile order: kept from before (its surfaces known, its arrays not), read from the store, or to build. */
     const tiles: PassTile[] = [];
+    /** The tiles to read from the store kept from an earlier session (`SurfaceReuse.stored`). */
+    const storedWanted: PassTile[] = [];
     // In tile order, so a mesh is laid out the same however it was reached.
     for (const key of inputs.tileKeys(pass.id)) {
       const { reach: into, digest: read, colours } = inputs.reachOf(pass.id, key);
@@ -353,13 +362,30 @@ export function* roadSurfaceSteps(
       if (reuse) digest.add(reuse.dependsOn(rect[0] - 1, rect[1] - 1, rect[2] + 1, rect[3] + 1));
       const value = digest.value();
       const surfaces = previous?.get(value);
-      const stored = surfaces ? undefined : reuse?.stored?.get(storedKey(pass.id, value));
       const chunk = `${Math.floor(ix / CHUNK)},${Math.floor(iy / CHUNK)}`;
-      tiles.push({ value, chunk, rect, into, surfaces: surfaces ?? (stored ? [...stored.keys()] : null), bundle: stored ?? null });
-      if (surfaces || stored) {
+      const tile: PassTile = { value, chunk, rect, into, surfaces: surfaces ?? null, bundle: null };
+      tiles.push(tile);
+      // Kept by the store from an earlier session: read below, with the pass's others, only while the steps can wait.
+      if (!surfaces && tiler && reuse?.stored?.has(storedKey(pass.id, value))) storedWanted.push(tile);
+      if (surfaces) {
         reused++;
         // A step too: the digests of every tile kept, back to back, were a slice of 20-30 ms after a road edit
         yield;
+      }
+    }
+    if (storedWanted.length) {
+      let read: ReadonlyMap<string, TileBundle> | null = null;
+      reuse!.stored!.read(storedWanted.map((tile) => storedKey(pass.id, tile.value))).then((got) => { read = got; }, (error: unknown) => {
+        console.warn('[roads] the kept tiles could not be read; they are built', error);
+        read = new Map();
+      });
+      while (read === null) yield 'wait';
+      for (const tile of storedWanted.splice(0)) {
+        const bundle = (read as ReadonlyMap<string, TileBundle>).get(storedKey(pass.id, tile.value));
+        if (!bundle) continue;
+        tile.bundle = bundle;
+        tile.surfaces = [...bundle.keys()];
+        reused++;
       }
     }
     /** The roads a share of the tiles reads, for a worker (`roadTileMesh.ts`) */
