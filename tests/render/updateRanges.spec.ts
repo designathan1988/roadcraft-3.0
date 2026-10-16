@@ -31,10 +31,20 @@ describe('markBox', () => {
     expect(sent(a)).toBeGreaterThanOrEqual(0);
   });
 
-  it('markAll drops the ranges waiting so the whole array is sent', () => {
+  it('markAll sends the whole array, the ranges waiting dropped', () => {
     const a = plate(3);
     markBox(a, 3, ROW, 1, 2, 1, 2);
     markAll(a);
-    expect(a.updateRanges).toHaveLength(0);
+    expect(a.updateRanges).toEqual([{ start: 0, count: ROW * ROW * 3 }]);
+  });
+
+  it('a box marked after the whole array, before the draw, still sends the whole array', () => {
+    const a = plate(3);
+    markAll(a);
+    markBox(a, 3, ROW, 1, 2, 1, 2);
+    // three.js merges the ranges it is given (`WebGLAttributes.updateBuffer`): the whole array is among them.
+    expect(a.updateRanges.some((r) => r.start === 0 && r.count === ROW * ROW * 3)).toBe(true);
+    for (let k = 0; k < 400; k++) markBox(a, 3, ROW, 5, 6, k % 300, k % 300);
+    expect(a.updateRanges.some((r) => r.start === 0 && r.count === ROW * ROW * 3)).toBe(true);
   });
 });
