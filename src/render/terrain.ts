@@ -725,6 +725,8 @@ function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): void {
 
 /** Side of the forest density grid over the plate (7.8 m a cell). */
 const FOREST_RES = 256;
+/** A cell of the cover densities, world units: a dab moves the densities this much past its own circle. */
+export const COVER_CELL = TERRAIN_SIZE / FOREST_RES;
 
 /** Lays one dab into the cover densities: its own cover towards full, every other towards none */
 function rasterCover(covers: Readonly<Record<CoverKind, Uint8Array>>, dab: PaintDab): void {
