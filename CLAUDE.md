@@ -127,10 +127,10 @@ Main thread
   first-time hitch on rain, trains, signals, explosions and a quality change.
 
 O(map) per edit
-- `snapshotRoads` does `doc.clone()` (`editRules.ts:114`) per in-place edit. Fix: judge on `doc.fork()`.
-- `Network.adopt` copies the whole network (`network.ts:270-300`), twice per road drawn. Fix: a
-  layered fork, adopting only the delta.
-- `elevation.ts` walks every ribbon per solve (`:448`) and digests with `JSON.stringify` (`:1177`).
+- `buildRoadElevation` (`elevation.ts`) rebuilds every road's profile per solve (~300 ms on 20,200
+  segments); `differences()` and `shapeBounds()` read the whole map. Fix: a solve forked from the
+  last by the network's delta, an index by profile, changes and bounds by area.
+- `refuseRoadEdit` loops over every node of `impossible` and `squeezed` per edit.
 - Undo: the first edit of a session builds a map of references to every record (80-235 ms on the
   10 km city); lists without ids (paint, trees, elements, fog) take one identity pass and rewrite
   their autosave section whole. Fix: ids on list items (a save format change).
@@ -166,7 +166,7 @@ map, 18.6 ms GPU on the whole map, relighting at sun ≥ 2°.
 Already fixed (do not report as open): transit and fog by the diary; gullies (`setGullies` gone);
 forests, covers, river stones, planted trees and elements cell by cell by the diary
 (`candidateKeep.ts` `CellKeep`, `plantPlaces.ts`); the undo image by reference and the autosave
-head in parts (manifest 4); terrain stamps and paint by box and by plate; the lot tool by index;
+head in parts (manifest 4); terrain stamps and paint by box and by plate; the lot tool by index; road edits on `doc.fork()` and `Network.fork`/`takeBack`;
 gardens, furniture and poles in view only (`instanceRuns.ts`, pixel cut for poles); profiler
 hooks only while shown; the opening reads only the road tiles it needs; the `no-global-revision` lint;
 chunk LRU cache; atlas `CACHE = 6`; lot tool JSON key; road tiles without CPU arrays; `pedPoseInto`;
