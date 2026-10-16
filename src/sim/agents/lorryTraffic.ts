@@ -28,6 +28,8 @@ const MAX_LORRIES = 4;
 /** Farthest a passing lorry is called from, and how long it has to reach the gate. */
 const CALL_REACH = m(400);
 const CALL_TIMEOUT = 180;
+/** How far a vehicle's body centre can stand from the bounds of the lane it is on (its length and a lane change's offset). */
+const CALL_PAD = m(30);
 /** Seconds a lorry stands at the dock while it is unloaded. */
 const UNLOAD_MIN = 45;
 const UNLOAD_MAX = 120;
@@ -208,9 +210,17 @@ export class LorryTraffic {
   /** A yard with no lorry, a dock of it drawn; planned, it is sent the nearest passing lorry. */
   private call(w: SimWorld): void {
     this.readYards(w);
-    const free = this.yards.filter((y) => ![...this.lorries.values()].some((l) => l.building === y.building));
-    if (!free.length) return;
-    const pick = free[Math.floor(w.rng.lorries.float() * free.length)]!;
+    // DO NOT filter every yard of the town for the few with a lorry: the draw skips their places in the list.
+    const busy: number[] = [];
+    for (const l of this.lorries.values()) {
+      const at = this.yardList.indexOf(l.building);
+      if (at !== undefined && !busy.includes(at)) busy.push(at);
+    }
+    const free = this.yards.length - busy.length;
+    if (!free) return;
+    let at = Math.floor(w.rng.lorries.float() * free);
+    for (const b of busy.sort((x, y) => x - y)) if (b <= at) at++;
+    const pick = this.yards[at]!;
     const dock = Math.floor(w.rng.lorries.float() * pick.docks);
     // DO NOT call `yardFor` to begin a yard here while `planning` names another building
     const yard = this.yardFor(w, pick.building, this.planning === null || this.planning.building === pick.building);
@@ -223,13 +233,15 @@ export class LorryTraffic {
     if (!lane) return;
     const stop = lane.centre.sampleAt(gate.stopAt).p;
     let best: Vehicle | null = null, bestD = CALL_REACH;
-    for (const v of w.vehicles.values()) {
+    // DO NOT walk the fleet: the vehicles on the lanes within reach (`SimWorld.vehiclesInBox`); a tie goes to the lower id.
+    const reach = CALL_REACH + CALL_PAD;
+    for (const v of w.vehiclesInBox(stop.x - reach, stop.y - reach, stop.x + reach, stop.y + reach)) {
       if (v.archetype.id !== 'truck' || v.commute || v.kerbStop || v.errand || this.lorries.has(v.id)) continue;
       if (v.lanelet === lane.id && v.s > gate.stopAt) continue;
       const pose = vehiclePose(w, v, 1);
       if (!pose) continue;
       const d = Math.hypot(pose.p.x - stop.x, pose.p.y - stop.y);
-      if (d < bestD) { bestD = d; best = v; }
+      if (d < bestD || (d === bestD && best !== null && v.id < best.id)) { bestD = d; best = v; }
     }
     if (!best) return;
     const v = best, was = v.destination;
@@ -439,6 +451,8 @@ export class YardList {
   private readonly kept = new BuildingsInOrder(hasYard);
   private readonly docks = new Map<BuildingId, number>();
   private list: { building: BuildingId; docks: number }[] = [];
+  /** Each yard's place in `list`. */
+  private readonly at = new Map<BuildingId, number>();
   /** The buildings the last `read` took out (gone, or with no yard now); null: it read the town whole. */
   gone: BuildingId[] | null = [];
 
@@ -458,6 +472,13 @@ export class YardList {
       else { this.docks.delete(id); this.gone?.push(id); }
     }
     this.list = this.kept.ids.map((building) => ({ building, docks: this.docks.get(building)! }));
+    this.at.clear();
+    this.list.forEach((y, i) => this.at.set(y.building, i));
     return this.list;
+  }
+
+  /** A yard's place in the list of the last `read`. */
+  indexOf(id: BuildingId): number | undefined {
+    return this.at.get(id);
   }
 }

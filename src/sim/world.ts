@@ -6,7 +6,7 @@ import type { Network } from '@world/network';
 import { type Connector, type GraphChange, type JunctionTopology, type Lanelet, type LaneletId, LaneletGraph } from '@world/lanelets';
 import { ChangeLog } from '@core/changeLog';
 import { NetworkLength } from '@world/networkLength';
-import { LaneGrid } from './agents/laneGrid';
+import { LaneGrid, lanesInBox } from './agents/laneGrid';
 import { LaneReaches } from './routing/laneReach';
 import { ConflictIndex, type BodyClass, WAITING } from '@world/conflictPoints';
 import { type ChosenTurn, TurnPlan } from '@world/junctionTurns';
@@ -1058,6 +1058,18 @@ export class SimWorld {
             out.push({ vehicle: v, s: lane.length + v.s });
           }
         }
+      }
+    }
+    return out;
+  }
+
+  /** DO NOT walk the fleet to find the vehicles near a place: those on the lanes whose bounds meet the box, lane by lane in id order. */
+  vehiclesInBox(x0: number, y0: number, x1: number, y1: number): Vehicle[] {
+    const out: Vehicle[] = [];
+    for (const lane of lanesInBox(this, x0, y0, x1, y1)) {
+      for (const id of this.rt(lane.id).order) {
+        const v = this.vehicles.get(id);
+        if (v) out.push(v);
       }
     }
     return out;
