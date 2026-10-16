@@ -81,4 +81,43 @@ describe('a train line loop', () => {
       }
     });
   }
+
+  it('keeps each train\'s discs while it stands, the same discs as made anew each tick', () => {
+    const { w } = lineOn([{ x: m(30), y: 0 }, { x: m(170), y: 0 }, { x: m(280), y: m(40) }]);
+    const transit = w.city.transit;
+    const inner = transit as unknown as {
+      rails: { line: { mode: string }; trains: { key: string; s: number; v: number; dwell: number }[] }[];
+      pointAt(rail: unknown, s: number): { x: number; y: number; heading: number };
+    };
+    // The discs as they were made before they were kept: a map by train, the moving trains' track ahead first.
+    const anew = (): { x: number; y: number; r: number }[][] => {
+      const zones = new Map<string, { x: number; y: number; r: number }[]>();
+      const zone = (key: string): { x: number; y: number; r: number }[] => { let z = zones.get(key); if (!z) zones.set(key, z = []); return z; };
+      for (const rail of inner.rails) {
+        if (rail.line.mode === 'metro') continue;
+        for (const train of rail.trains) {
+          if (train.v < m(1) && train.dwell > 7) continue;
+          const reach = Math.max(m(30), train.v * 7);
+          for (let d = m(4); d < reach; d += m(3)) { const p = inner.pointAt(rail, train.s + d); zone(train.key).push({ x: p.x, y: p.y, r: m(1.9) }); }
+        }
+      }
+      for (const t of transit.trains()) {
+        if (t.metro) continue;
+        for (const car of t.cars) {
+          for (let d = -m(18) / 2 + m(1.5); d <= m(18) / 2 - m(1.5) + 1e-6; d += m(2.5)) {
+            zone(t.key).push({ x: car.x + Math.cos(car.heading) * d, y: car.y + Math.sin(car.heading) * d, r: m(1.8) });
+          }
+        }
+      }
+      return [...zones.values()];
+    };
+    let standing = 0;
+    for (let k = 0; k < 2400; k++) {
+      transit.step(w);
+      if (inner.rails.some((r) => r.trains.some((t) => t.v < m(1) && t.dwell > 7))) standing++;
+      expect(transit.trainZones().map((z) => z.map((d) => ({ ...d })))).toEqual(anew());
+    }
+    expect(standing).toBeGreaterThan(100);
+  });
 });
+

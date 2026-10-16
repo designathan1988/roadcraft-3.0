@@ -1,6 +1,8 @@
 import type { Vec2 } from '@core/vec2';
 import { type RailGraph, type TransitLine, type TransitStop, railGraph, railPath } from '@world/transit';
 import { m } from '@world/units';
+import { CellFiling } from '@world/cells';
+import type { ChangeRect } from '@world/changes';
 import { DRIVER_NOISE, DT } from '../params';
 import type { SimWorld } from '../world';
 import { ARCHETYPES, bodyClassOfArchetype } from '../vehicles/archetypes';
@@ -60,6 +62,9 @@ interface Train {
   dwell: number;
 }
 
+/** A disc a walker keeps out of: a centre and a radius. */
+interface Disc { x: number; y: number; r: number }
+
 /** Where a train track crosses a lane of a road at grade: the lane, how far along it, how far along the line's loop. */
 interface LevelCrossing { readonly lanelet: string; readonly at: number; readonly loopS: number }
 
@@ -74,6 +79,8 @@ interface RailLine {
   /** Each station on the loop: the stop's id, its distance along it, and whether the loop turns back there */
   readonly stations: { readonly stop: number; readonly s: number; readonly turn: boolean }[];
   readonly trains: Train[];
+  /** The bounds of its points, for the edits that reach it (`followLanes`). */
+  readonly box: ChangeRect;
 }
 
 /** A train as drawn: its cars, each a centre and a heading; its line's colour; underground or not. */
@@ -97,16 +104,30 @@ export class TransitSim {
   /** The lines by id, made again with them (`lineOf`). */
   private lines = new Map<number, TransitLine>();
 
+  /** DO NOT walk every stop of the town for an edit of the roads: the bus stops by the cells their lane reach meets, and the bus lines through each. */
+  private busStops = new CellFiling<number, TransitStop>();
+  private readonly busLinesOf = new Map<number, number[]>();
+
   /** The lines and their vehicles made again from the map as it is. */
   private rebuild(w: SimWorld): void {
     const t = w.doc.transit;
     this.stops = new Map(t.stops.map((s) => [s.id, s]));
     this.lines = new Map(t.lines.map((l) => [l.id, l]));
     this.stopLanes.clear();
+    this.busStops = new CellFiling();
+    this.busLinesOf.clear();
     for (const s of t.stops) {
       if (s.mode !== 'bus') continue;
+      this.busStops.file(s.id, s, [s.x - LANE_BESIDE_REACH, s.y - LANE_BESIDE_REACH, s.x + LANE_BESIDE_REACH, s.y + LANE_BESIDE_REACH]);
       const lane = laneBeside(w, s.x, s.y, s.segment);
       if (lane) this.stopLanes.set(s.id, lane);
+    }
+    for (const line of t.lines) {
+      if (line.mode !== 'bus') continue;
+      for (const id of new Set(line.stops)) {
+        const of = this.busLinesOf.get(id);
+        if (of) of.push(line.id); else this.busLinesOf.set(id, [line.id]);
+      }
     }
     // DO NOT take every bus off the road here
     const before = new Map<number, Bus[]>();
@@ -153,6 +174,7 @@ export class TransitSim {
     const t = w.doc.transit;
     const railsBefore = new Map(this.rails.map((r) => [r.line.id, r]));
     this.rails = [];
+    this.zones.clear();
     this.crossingsByLane.clear();
     const graphs: Record<'train' | 'metro', RailGraph> = { train: railGraph(t, 'train'), metro: railGraph(t, 'metro') };
     for (const line of t.lines) {
@@ -197,7 +219,9 @@ export class TransitSim {
       }
       // Level crossings: where the loop crosses a lane of a road (the metro runs under them all).
       const crossings = line.mode === 'train' ? levelCrossings(w, points, at) : [];
-      const rail: RailLine = { line, crossings, points, at, length, stations: stationsOn, trains };
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const p of points) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+      const rail: RailLine = { line, crossings, points, at, length, stations: stationsOn, trains, box: [x0, y0, x1, y1] };
       this.rails.push(rail);
       for (const c of crossings) {
         const list = this.crossingsByLane.get(c.lanelet);
@@ -218,12 +242,12 @@ export class TransitSim {
     const near = (x0: number, y0: number, x1: number, y1: number): boolean =>
       boxes.some((r) => r[0] <= x1 && r[2] >= x0 && r[1] <= y1 && r[3] >= y0);
     const lines = new Set<number>();
-    for (const s of this.stops.values()) {
-      if (s.mode !== 'bus' || !near(s.x - LANE_BESIDE_REACH, s.y - LANE_BESIDE_REACH, s.x + LANE_BESIDE_REACH, s.y + LANE_BESIDE_REACH)) continue;
+    for (const id of this.busStops.idsMeetingAny(boxes)) {
+      const s = this.stops.get(id)!;
       const lane = laneBeside(w, s.x, s.y, s.segment);
       const was = this.stopLanes.get(s.id);
       if (lane) this.stopLanes.set(s.id, lane); else this.stopLanes.delete(s.id);
-      if (!sameLane(was, lane)) for (const line of this.lines.values()) if (line.mode === 'bus' && line.stops.includes(s.id)) lines.add(line.id);
+      if (!sameLane(was, lane)) for (const line of this.busLinesOf.get(s.id) ?? []) lines.add(line);
     }
     if (lines.size) {
       const before = new Map<number, Bus[]>();
@@ -238,10 +262,7 @@ export class TransitSim {
       }
     }
     for (const rail of this.rails) {
-      if (rail.line.mode !== 'train') continue;
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const p of rail.points) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
-      if (!near(x0, y0, x1, y1)) continue;
+      if (rail.line.mode !== 'train' || !near(rail.box[0], rail.box[1], rail.box[2], rail.box[3])) continue;
       for (const c of rail.crossings) {
         const list = this.crossingsByLane.get(c.lanelet);
         if (!list) continue;
@@ -427,32 +448,57 @@ export class TransitSim {
   }
 
   /** Every car of the trains at grade, and the track just ahead of each moving one, as discs a walker keeps clear of */
-  trainZones(ahead = true): { x: number; y: number; r: number }[][] {
-    const zones = new Map<string, { x: number; y: number; r: number }[]>();
-    const zone = (key: string): { x: number; y: number; r: number }[] => { let z = zones.get(key); if (!z) { z = []; zones.set(key, z); } return z; };
-    for (const rail of ahead ? this.rails : []) {
-      if (rail.line.mode === 'metro') continue;
-      for (const train of rail.trains) {
-        // Standing at a station, it is ground to keep off only once it is about to leave.
-        if (train.v < m(1) && train.dwell > AHEAD_TIME) continue;
-        // Ahead by time, not distance: as long as it takes to walk across the track.
-        const reach = Math.max(TRAIN_AHEAD, train.v * AHEAD_TIME);
-        for (let d = m(4); d < reach; d += m(3)) {
-          const p = this.pointAt(rail, train.s + d);
-          zone(train.key).push({ x: p.x, y: p.y, r: m(1.9) });
+  trainZones(ahead = true): Disc[][] {
+    const out = this.zonesOut;
+    out.length = 0;
+    // The moving trains' first, then those standing at a station (the order the walkers' cells are filed in).
+    for (const standingPass of [false, true]) {
+      for (const rail of this.rails) {
+        if (rail.line.mode === 'metro') continue;
+        for (const train of rail.trains) {
+          // Standing at a station, it is ground to keep off only once it is about to leave.
+          const standing = !ahead || (train.v < m(1) && train.dwell > AHEAD_TIME);
+          if (standing === standingPass) out.push(this.zoneOf(rail, train, !standing));
         }
       }
     }
-    for (const t of this.trains()) {
-      if (t.metro) continue;
-      // Discs close enough to overlap: no gap a person could slip through.
-      for (const car of t.cars) {
-        for (let d = -CAR_LENGTH / 2 + m(1.5); d <= CAR_LENGTH / 2 - m(1.5) + 1e-6; d += m(2.5)) {
-          zone(t.key).push({ x: car.x + Math.cos(car.heading) * d, y: car.y + Math.sin(car.heading) * d, r: m(1.8) });
-        }
+    return out;
+  }
+
+  /** The list `trainZones` hands out, filled again at each call. */
+  private readonly zonesOut: Disc[][] = [];
+  /** DO NOT make every train's discs anew at each tick: kept per train, made again only when it moved (or began to move). */
+  private readonly zones = new Map<Train, { rail: RailLine; s: number; v: number; ahead: boolean; discs: Disc[] }>();
+
+  /** A train's discs: the track ahead (`ahead`), then its cars. */
+  private zoneOf(rail: RailLine, train: Train, ahead: boolean): Disc[] {
+    let kept = this.zones.get(train);
+    if (kept && kept.rail === rail && kept.s === train.s && kept.v === train.v && kept.ahead === ahead) return kept.discs;
+    if (!kept) this.zones.set(train, kept = { rail, s: train.s, v: train.v, ahead, discs: [] });
+    kept.rail = rail; kept.s = train.s; kept.v = train.v; kept.ahead = ahead;
+    const discs = kept.discs;
+    let n = 0;
+    const put = (x: number, y: number, r: number): void => {
+      const d = discs[n++];
+      if (d) { d.x = x; d.y = y; d.r = r; } else discs.push({ x, y, r });
+    };
+    if (ahead) {
+      // Ahead by time, not distance: as long as it takes to walk across the track.
+      const reach = Math.max(TRAIN_AHEAD, train.v * AHEAD_TIME);
+      for (let d = m(4); d < reach; d += m(3)) {
+        const p = this.pointAt(rail, train.s + d);
+        put(p.x, p.y, m(1.9));
       }
     }
-    return [...zones.values()];
+    // Discs close enough to overlap: no gap a person could slip through.
+    for (let k = 0; k < TRAIN_CARS; k++) {
+      const car = this.pointAt(rail, train.s - CAR_LENGTH * (k + 0.5));
+      for (let d = -CAR_LENGTH / 2 + m(1.5); d <= CAR_LENGTH / 2 - m(1.5) + 1e-6; d += m(2.5)) {
+        put(car.x + Math.cos(car.heading) * d, car.y + Math.sin(car.heading) * d, m(1.8));
+      }
+    }
+    discs.length = n;
+    return discs;
   }
 
   /** Every train as drawn. */

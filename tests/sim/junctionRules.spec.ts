@@ -130,6 +130,47 @@ describe('the control "automatic" chooses from the flows', () => {
     expect(sim.graph.junctions.get(centre)?.signalised).toBe(true);
     expect(sim.controllers.get(centre)).toBeDefined();
   });
+
+  it('evaluates again only the junctions counted at, built again or not settled: none it leaves out could change', () => {
+    const doc = new RoadDoc();
+    const ids: number[][] = [];
+    for (let i = 0; i <= 4; i++) { ids.push([]); for (let j = 0; j <= 4; j++) ids[i]!.push(doc.addNode({ x: 120 * i, y: 120 * j }).id); }
+    for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++) {
+      if (i < 4) doc.addSegment(ids[i]![j]! as never, ids[i + 1]![j]! as never, j % 2 ? 1 : 3);
+      if (j < 4) doc.addSegment(ids[i]![j]! as never, ids[i]![j + 1]! as never, 1);
+    }
+    doc.addSegment(ids[0]![0]! as never, doc.addNode({ x: -150, y: 0 }).id as never, 1);
+    doc.addSegment(ids[4]![4]! as never, doc.addNode({ x: 630, y: 480 }).id as never, 1);
+    const sim = simOf(doc, 11, 3);
+    sim.trafficCount = 40;
+    // Past the trend window from the start: every evaluation may change a choice.
+    sim.flow.measured = F.trendWindow * 2;
+    const watched = (): ReadonlySet<number> | null => (sim.advisor as unknown as { watched: ReadonlySet<number> | null }).watched;
+    let left = 0, evaluations = 0;
+    for (let round = 0; round < 40; round++) {
+      for (let t = 0; t < 30; t++) step(sim, { traffic: true, pedestrians: false });
+      sim.stepControlAdvisor(ControlAdvisor.EVERY);
+      evaluations++;
+      for (const [node, junction] of sim.graph.junctions) {
+        const n = doc.node(node)!;
+        if (watched()?.has(node) || n.control !== 'auto' || n.incident.length < 3) continue;
+        left++;
+        // Out of the evaluations: what one would say now is what it has.
+        const main = mainRoadLegs(doc, node);
+        let major = 0, minorMax = 0, minorTotal = 0;
+        for (const seg of n.incident) {
+          const rate = sim.flow.rate(node, seg);
+          if (main?.includes(seg)) major += rate; else { minorMax = Math.max(minorMax, rate); minorTotal += rate; }
+        }
+        const choice = sim.advisor.choice(node)!;
+        expect(choice).toBe('priority');
+        expect(warrantedControl(major, minorMax, minorTotal, choice)).toBe(choice);
+        expect(junction.signalised).toBe(false);
+      }
+    }
+    expect(evaluations).toBe(40);
+    expect(left).toBeGreaterThan(40);
+  });
 });
 
 describe('signals', () => {

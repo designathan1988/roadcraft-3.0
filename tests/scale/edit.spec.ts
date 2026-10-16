@@ -35,6 +35,8 @@ function catchUp(net: Network, w: SimWorld): void {
   while (!prep.next().done) { /* a slice a frame in the game */ }
   w.rebuildTopology();
   w.walkwaysNow();
+  // The junctions and signals in node order, as stage 1 and the frame read them each tick.
+  w.signalisedControllers();
   trapLanes(w, 1);
   // The road ends a lane reaches (`laneReach.ts`), asked as a car made at a road end asks.
   const first = [...w.graph.lanelets.values()].find((lane) => lane.kind === 'link');
