@@ -2225,10 +2225,17 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     paint = [paintLayer(next, 0), paintLayer(next, 1)];
     lightLayer = paintLayer(next, LIGHT_LAYER);
     small.dispose();
-    // The new array goes whole when first drawn.
+    // The new array goes whole when first drawn, its light layer with it.
+    watchPaint(next);
+    paintWhole = true;
     paintDirty = null;
     lightDirty = null;
   };
+  /** Whether the array's next upload must be whole (grown, or let go): three.js r186 sends only the layers waiting, when any are. */
+  let paintWhole = false;
+  const watchPaint = (texture: DataArrayTexture): void => { texture.onUpdate = () => { paintWhole = false; }; };
+  watchPaint(paintArray);
+  // As made, its light layer alone goes: WebGL starts a texture at zero, as the painted layers are.
   paintArray.addLayerUpdate(LIGHT_LAYER);
   paintArray.needsUpdate = true;
   /** DO NOT send a whole layer of the painted ground (4 MB) for a dab: the texels written since the last frame, a box of layers 0-1 and one of the light's. */
@@ -2241,6 +2248,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
   /** The boxes written since the last frame, sent before it is drawn (`bakeRelief`). */
   const sendPaint = (renderer: WebGLRenderer): void => {
     if (!paintDirty && !lightDirty) return;
+    // The whole array goes when next drawn, these boxes in it: a box copied now would send it whole first (`copyTextureToTexture`).
+    if (paintWhole) { paintDirty = null; lightDirty = null; return; }
     if (paintSource?.image.data !== paintArray.image.data) paintSource = new DataTexture(paintArray.image.data, paintRes, paintRes, RGBAFormat, UnsignedByteType);
     for (const [box, z0, z1] of [[paintDirty, 0, 1], [lightDirty, LIGHT_LAYER, LIGHT_LAYER]] as const) {
       if (!box) continue;
@@ -2401,8 +2410,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     if (covered) {
       forestRevision++;
       if (!added) {
-        paintArray.addLayerUpdate(0);
-        paintArray.addLayerUpdate(1);
+        // DO NOT name the layers on an array that goes whole: its light layer (a plate's first dab grows it) was left out.
+        if (!paintWhole) { paintArray.addLayerUpdate(0); paintArray.addLayerUpdate(1); }
         paintArray.needsUpdate = true;
         paintDirty = null;
       }

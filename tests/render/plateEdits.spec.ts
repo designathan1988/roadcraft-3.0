@@ -81,9 +81,12 @@ describe('a plate edited by the brush', () => {
     atlas.updatePaint(doc as never);
     const s = home(atlas);
     const shore = userData(s)['shore'] as DataTexture;
+    const paint = userData(s)['paint'] as DataArrayTexture;
+    // The first dab grew the array: it goes whole, its light layer too (three.js r186 would send only the layers named).
+    expect(paint.layerUpdates.size).toBe(0);
     // Sent whole once (three.js calls `onUpdate` after an upload).
     shore.onUpdate?.(shore);
-    const paint = userData(s)['paint'] as DataArrayTexture;
+    paint.onUpdate?.(paint);
     const paintVersion = paint.version, shoreVersion = shore.version;
     const copies: { min: number[]; max: number[] }[] = [];
     const renderer = { copyTextureToTexture: (_src: unknown, _dst: unknown, region: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }) => {
