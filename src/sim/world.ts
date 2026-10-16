@@ -264,7 +264,7 @@ export class SimWorld {
     this.sidewalks.clear();
     this.walkSeen = null;
     this.signalPosts.reset();
-    this.junctionsVersion++;
+    this.staleJunctions(null);
     this.occupied.clear();
     this.ghostCandidates.clear();
     this.asleep.clear();
@@ -351,53 +351,101 @@ export class SimWorld {
   }
 
   junctionNodesInOrder(): readonly NodeId[] {
-    if (this.junctionOrder.version !== this.junctionsVersion) this.refreshJunctionOrder();
-    return this.junctionOrder.nodes;
+    this.refreshJunctionOrder();
+    return this.junctionOrder.nodes.inKeyOrder();
   }
 
   /** The controllers stage 1 runs, in node order: those of the signalised junctions. */
   signalisedControllers(): readonly SignalController[] {
-    if (this.junctionOrder.version !== this.junctionsVersion) this.refreshJunctionOrder();
-    return this.junctionOrder.signalised;
+    this.refreshJunctionOrder();
+    return this.junctionOrder.signalised.inKeyOrder();
   }
 
   /** Moves whenever the junctions or their controllers do (a topology rebuild, a control the advisor switched) */
   private junctionsVersion = 0;
-  private junctionOrder: {
-    version: number; nodes: readonly NodeId[]; signalised: readonly SignalController[];
+  /** DO NOT sort and file every junction of the map again for an edit: only those it reached (`staleJunctions`). */
+  private readonly junctionOrder = {
+    nodes: new VersionedMap<NodeId, NodeId>(), signalised: new VersionedMap<NodeId, SignalController>(),
     /** The junction each approach lane leads into (`junctionsApproached`). */
-    junctionOf: ReadonlyMap<LaneletId, NodeId>;
+    junctionOf: new Map<LaneletId, NodeId>(),
     /** The signal each approach lane and each crossing of a plan belongs to: what wakes it (`signalsAsleep`). */
-    approachOf: ReadonlyMap<LaneletId, SignalController>; crossingOf: ReadonlyMap<CrossingId, readonly SignalController[]>;
-  } = { version: -1, nodes: [], signalised: [], junctionOf: new Map(), approachOf: new Map(), crossingOf: new Map() };
+    approachOf: new Map<LaneletId, SignalController>(), crossingOf: new Map<CrossingId, SignalController[]>(),
+    /** What each junction filed above, taken out when it is filed again. */
+    filed: new Map<NodeId, { readonly inbound: readonly LaneletId[]; readonly controller: SignalController | null; readonly crossings: readonly CrossingId[] }>(),
+  };
+  /** The junctions whose filing is out of date (`refreshJunctionOrder`); null: every one. */
+  private junctionsStale: Set<NodeId> | null = null;
+
+  /** These junctions, or their controllers, changed (null: any of them may have). */
+  private staleJunctions(nodes: Iterable<NodeId> | null): void {
+    this.junctionsVersion++;
+    if (nodes === null) this.junctionsStale = null;
+    else if (this.junctionsStale) for (const node of nodes) this.junctionsStale.add(node);
+  }
+
   private refreshJunctionOrder(): void {
-    const nodes = [...this.graph.junctions.keys()].sort((a, b) => a - b);
-    rebuildWork.lanes += nodes.length;
-    const signalised: SignalController[] = [];
-    const junctionOf = new Map<LaneletId, NodeId>();
-    const approachOf = new Map<LaneletId, SignalController>();
-    const crossingOf = new Map<CrossingId, SignalController[]>();
+    const stale = this.junctionsStale;
+    if (stale && stale.size === 0) return;
+    this.junctionsStale = new Set();
+    const order = this.junctionOrder;
+    if (stale === null) {
+      order.nodes.clear(); order.signalised.clear(); order.junctionOf.clear(); order.approachOf.clear(); order.crossingOf.clear(); order.filed.clear();
+    }
+    const nodes = stale ?? [...this.graph.junctions.keys()].sort((a, b) => a - b);
     for (const node of nodes) {
-      const c = this.controllers.get(node);
-      const junction = this.graph.junctions.get(node);
-      for (const lane of junction?.inbound ?? []) junctionOf.set(lane, node);
-      if (!c || !junction?.signalised) continue;
-      signalised.push(c);
-      for (const lane of junction.inbound) approachOf.set(lane, c);
-      for (const stage of c.plan.stages) {
-        for (const x of stage.pedWalk) {
-          const of = crossingOf.get(x);
-          if (!of) crossingOf.set(x, [c]);
-          else if (!of.includes(c)) of.push(c);
-        }
+      rebuildWork.lanes++;
+      if (stale) this.unfileJunction(node);
+      this.fileJunction(node);
+    }
+  }
+
+  /** A junction's lanes and crossings taken out of `junctionOrder` (its place in the node lists is `fileJunction`'s). */
+  private unfileJunction(node: NodeId): void {
+    const order = this.junctionOrder;
+    const was = order.filed.get(node);
+    if (!was) return;
+    order.filed.delete(node);
+    for (const lane of was.inbound) if (order.junctionOf.get(lane) === node) order.junctionOf.delete(lane);
+    const c = was.controller;
+    if (!c) return;
+    for (const lane of was.inbound) if (order.approachOf.get(lane) === c) order.approachOf.delete(lane);
+    for (const x of was.crossings) {
+      const of = order.crossingOf.get(x);
+      const at = of ? of.indexOf(c) : -1;
+      if (at < 0) continue;
+      of!.splice(at, 1);
+      if (!of!.length) order.crossingOf.delete(x);
+    }
+  }
+
+  /** A junction, as the graph and its controller stand now, filed in `junctionOrder`. */
+  private fileJunction(node: NodeId): void {
+    const order = this.junctionOrder;
+    const junction = this.graph.junctions.get(node);
+    if (!junction) { order.nodes.delete(node); order.signalised.delete(node); return; }
+    if (!order.nodes.has(node)) order.nodes.set(node, node);
+    for (const lane of junction.inbound) order.junctionOf.set(lane, node);
+    const found = this.controllers.get(node);
+    const c = found && junction.signalised ? found : null;
+    const crossings: CrossingId[] = [];
+    order.filed.set(node, { inbound: junction.inbound, controller: c, crossings });
+    if (!c) { if (order.signalised.has(node)) order.signalised.delete(node); return; }
+    if (order.signalised.get(node) !== c) order.signalised.set(node, c);
+    for (const lane of junction.inbound) order.approachOf.set(lane, c);
+    for (const stage of c.plan.stages) {
+      for (const x of stage.pedWalk) {
+        if (crossings.includes(x)) continue;
+        crossings.push(x);
+        const of = order.crossingOf.get(x);
+        if (!of) order.crossingOf.set(x, [c]);
+        else if (!of.includes(c)) of.push(c);
       }
     }
-    this.junctionOrder = { version: this.junctionsVersion, nodes, signalised, junctionOf, approachOf, crossingOf };
   }
 
   /** The junctions with a vehicle on one of their approaches, in node order: the only ones with a lane head to admit */
   junctionsApproached(): readonly NodeId[] {
-    if (this.junctionOrder.version !== this.junctionsVersion) this.refreshJunctionOrder();
+    this.refreshJunctionOrder();
     const { junctionOf } = this.junctionOrder;
     const out = this.approached, seen = this.approachedSeen;
     seen.clear();
@@ -423,7 +471,7 @@ export class SimWorld {
       this.asleepSince = { roads, junctions: this.junctionsVersion };
     }
     if (asleep.size === 0) return asleep;
-    if (this.junctionOrder.version !== this.junctionsVersion) this.refreshJunctionOrder();
+    this.refreshJunctionOrder();
     const { approachOf, crossingOf } = this.junctionOrder;
     for (const lane of this.occupied) {
       const c = approachOf.get(lane);
@@ -534,7 +582,7 @@ export class SimWorld {
       if (!this.graph.lanelets.has(id)) this.ghostCandidates.add(id);
       else if (rt.ghost) { rt.ghost = false; rt.ghostSince = 0; }
     }
-    this.junctionsVersion++;
+    this.staleJunctions(changed?.junctions ?? null);
     // The controls the flows chose stay chosen across an edit (V5); a junction gone takes its own away.
     if (changed === null) {
       const nodes = new Set(this.graph.junctions.keys());
@@ -608,7 +656,7 @@ export class SimWorld {
       const signalised = choice === 'signal';
       if (junction.signalised === signalised) continue;
       this.graph.junctions.set(node, { ...junction, signalised });
-      this.junctionsVersion++;
+      this.staleJunctions([node]);
       this.noteSignal(node);
       changed = true;
     }
@@ -852,7 +900,7 @@ export class SimWorld {
         this.noteSignal(node);
       }
     }
-    this.junctionsVersion++;
+    this.staleJunctions(only);
   }
 
   /** What each controller's plan was made from (`syncControllers`). */
