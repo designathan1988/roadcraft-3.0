@@ -30,8 +30,8 @@ import { MAX_PAINT_DABS, type PaintDab, isPaintKind } from './terrainPaint';
 import { MAX_PLACED_CLOUDS, readCloud, type PlacedCloud } from './clouds';
 import { DEFAULT_WEATHER, readWeather, type Weather } from './weather';
 import { DEFAULT_ECONOMY, readEconomy, type Economy } from './economy';
-import { MAX_PLANTED_TREES, MAX_TREE_CLEARINGS, readPlantedTree, readTreeClearing, type PlantedTree, type TreeClearing } from './trees';
-import { MAX_ELEMENTS, readElement, type ElementItem, type ElementKind } from './elements';
+import { MAX_TREE_CLEARINGS, readPlantedTree, readTreeClearing, type PlantedTree, type TreeClearing } from './trees';
+import { readElement, type ElementItem, type ElementKind } from './elements';
 import { DEFAULT_GULLY_AUTO, MAX_GULLY_DABS, readGullyDab, type GullyDab } from './gullies';
 import { DEFAULT_FOG, MAX_FOG_DABS, readFogDab, readFogSettings, type FogDab, type FogSettings } from './fogPaint';
 import { isNatureSettings, type NatureSettings } from './ecology';
@@ -1089,11 +1089,9 @@ export class RoadDoc {
   plantTrees(trees: readonly PlantedTree[]): void {
     if (trees.length === 0) return;
     this.ownList('trees');
+    // DO NOT drop the oldest trees past a count: they are the player's (the brush's spacing bounds them by the land).
     for (const t of trees) { const tree = { ...t }; this.trees.push(tree); this.treeGrid?.add(tree); }
-    const gone = this.trees.length > MAX_PLANTED_TREES ? this.trees.splice(0, this.trees.length - MAX_PLANTED_TREES) : [];
-    for (const t of gone) this.treeGrid?.remove(t);
-    const goneRect = rectAround(gone, ITEM_PAD);
-    this.changes.record('trees', goneRect ? [rectAround(trees, ITEM_PAD)!, goneRect] : [rectAround(trees, ITEM_PAD)!]);
+    this.changes.record('trees', [rectAround(trees, ITEM_PAD)!]);
   }
 
   /** Cuts the trees away within `radius` of (x, y) */
@@ -1131,13 +1129,9 @@ export class RoadDoc {
   addElements(items: readonly ElementItem[]): void {
     if (items.length === 0) return;
     this.ownList('elements');
+    // DO NOT drop the oldest elements past a count: they are the player's (the brush's spacing bounds them by the land).
     for (const item of items) { this.elements.push(item); this.elementGrid?.add(item); }
-    const gone = this.elements.length > MAX_ELEMENTS ? this.elements.splice(0, this.elements.length - MAX_ELEMENTS) : [];
-    for (const item of gone) this.elementGrid?.remove(item);
-    const rects = [elementsBox(items)!];
-    const goneRect = elementsBox(gone);
-    if (goneRect) rects.push(goneRect);
-    this.changes.record('elements', rects);
+    this.changes.record('elements', [elementsBox(items)!]);
   }
 
   /** Takes away the elements within `radius` of (x, y) - of one kind, or every kind (`kind` null). How many went. */
@@ -2126,7 +2120,7 @@ export class RoadDoc {
     // Absent: a map with no trees planted or cut.
     for (const raw of data.trees ?? []) {
       const tree = readPlantedTree(raw);
-      if (tree && doc.trees.length < MAX_PLANTED_TREES) doc.trees.push(tree);
+      if (tree) doc.trees.push(tree);
     }
     if (doc.trees.length) doc.changes.record('trees', null, loaded);
     for (const raw of data.treeClearings ?? []) {

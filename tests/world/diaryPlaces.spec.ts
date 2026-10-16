@@ -5,8 +5,8 @@ import type { Change, ChangeKind, ChangeRect } from '@world/changes';
 import { MAX_PAINT_DABS } from '@world/terrainPaint';
 import { MAX_FOG_DABS } from '@world/fogPaint';
 import { MAX_GULLY_DABS } from '@world/gullies';
-import { MAX_ELEMENTS, type ElementItem } from '@world/elements';
-import { MAX_PLANTED_TREES, MAX_TREE_CLEARINGS, type PlantedTree } from '@world/trees';
+import type { ElementItem } from '@world/elements';
+import { MAX_TREE_CLEARINGS, type PlantedTree } from '@world/trees';
 import { MAX_TERRAIN_STAMPS } from '@world/terrain';
 import { blueprintByKey } from '@world/buildings/blueprints';
 import { type Building, cloneBuilding } from '@world/buildings/types';
@@ -152,20 +152,25 @@ describe('a list at its cap: the place of the item that left, not the whole map'
     }
   });
 
-  it('trees and elements', () => {
+  it('trees and elements: where they were laid, the oldest kept however many there are', () => {
     const doc = new RoadDoc();
     const tree = (x: number): PlantedTree => ({ x, y: x, height: 10, yaw: 0, seed: 0.5 });
     const element = (x: number): ElementItem => ({ kind: 'rock', x, y: x, size: 2, yaw: 0, seed: 0.5 } as unknown as ElementItem);
-    doc.plantTrees([tree(-2000), ...Array.from({ length: MAX_PLANTED_TREES - 1 }, () => tree(2000))]);
-    doc.addElements([element(-2000), ...Array.from({ length: MAX_ELEMENTS - 1 }, () => element(2000))]);
+    // Past the counts the map once dropped its oldest at (20 000 trees, 60 000 elements): nothing of the player's goes.
+    doc.plantTrees([tree(-2000), ...Array.from({ length: 20_000 }, () => tree(2000))]);
+    doc.addElements([element(-2000), ...Array.from({ length: 60_000 }, () => element(2000))]);
     const seen = doc.changes.version;
     doc.plantTrees([tree(2000)]);
     doc.addElements([element(2000)]);
+    expect(doc.trees[0]!.x).toBe(-2000);
+    expect(doc.trees.length).toBe(20_002);
+    expect(doc.elements[0]!.x).toBe(-2000);
+    expect(doc.elements.length).toBe(60_002);
     for (const kind of ['trees', 'elements'] as const) {
       const entries = entriesSince(doc, seen, kind);
       expect(placed(entries), kind).toBe(true);
-      expect(covers(entries, -2000, -2000), kind).toBe(true);
-      expect(covers(entries, 0, 0), kind).toBe(false);
+      expect(covers(entries, 2000, 2000), kind).toBe(true);
+      expect(covers(entries, -2000, -2000), kind).toBe(false);
     }
   });
 

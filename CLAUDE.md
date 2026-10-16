@@ -164,8 +164,10 @@ O(map) per edit
   3,500-4,500 lines (`main.ts`, `renderer.ts`, `buildingMesh.ts`).
 
 Player's decisions
-- Caps that delete the player's work: `MAX_PLANTED_TREES = 20_000` (`doc.ts:1334`), elements
-  (`:1381`), undo dropping old steps by bytes (`history.ts:128`).
+- Brush streams kept by dropping the oldest dab past a count (`doc.ts` `addPaintDab`, `addFogDab`,
+  `addGullyDab`, `cutTrees` clearings, `addTerrainStamp`): repainting one place grows the list, so
+  the cap stays; the fix is baking strokes into a layer per plate. Undo drops old steps by bytes
+  (`history.ts:128`). Planted trees and elements are never dropped (the brush's spacing bounds them).
 - About 7 KB per building record (560 MB at 80,000 buildings); seed + lot would change the generator.
 
 Memory measured (heap snapshots, SwiftShader, `scratchpad` probes; 2026-10-16):

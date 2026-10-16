@@ -22,9 +22,6 @@ export interface ElementItem {
   readonly intensity?: number;
 }
 
-/** The most elements a map keeps; the oldest go first. */
-export const MAX_ELEMENTS = 60_000;
-
 /** The brush's settings, in the player's units. */
 export interface ElementBrush {
   /** Instances per 100 m² at full strength. */

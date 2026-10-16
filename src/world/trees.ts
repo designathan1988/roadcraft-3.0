@@ -36,8 +36,7 @@ export interface TreeBrush {
 }
 
 export const DEFAULT_TREE_BRUSH: TreeBrush = { density: 120, height: 12, variation: 35, spacing: 6 };
-/** A map keeps at most this many planted trees, and this many clearings; the oldest go first. */
-export const MAX_PLANTED_TREES = 20_000;
+/** A map keeps at most this many clearings, the oldest going first (a brush's stream; its trees are never dropped). */
 export const MAX_TREE_CLEARINGS = 10_000;
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
