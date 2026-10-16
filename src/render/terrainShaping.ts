@@ -75,8 +75,41 @@ export function shapeBoth(roads: { shapeAt: ShapeAt } | null, pads: { shapeAt: S
 
 /** The height a plate's ground is drawn at, at a point of the plate (its own coordinates, inside it) */
 export function sampleCorners(grid: Pick<CornerGrid, 'n' | 'cell' | 'half'>, corners: ArrayLike<number>, diagonals: ArrayLike<number>, x: number, y: number): number {
-  const n = grid.n;
-  const segments = n - 1;
+  return sampleIn(grid, corners, diagonals, x, y, 0, 0, grid.n, grid.n) ?? NaN;
+}
+
+/** Some corners of a plate's grid and their cells' diagonals, handed to a worker (`heightTile.ts`) */
+export interface CornerWindow {
+  readonly x0: number;
+  readonly y0: number;
+  readonly w: number;
+  readonly h: number;
+  readonly corners: Float64Array;
+  readonly diagonals: Uint8Array;
+}
+
+/** The corners round a box of the plate's coordinates, a corner more each way (`sampleWindow` reads them). */
+export function cornerWindow(grid: Pick<CornerGrid, 'n' | 'cell' | 'half'>, corners: ArrayLike<number>, diagonals: ArrayLike<number>, box: Aabb): CornerWindow {
+  const n = grid.n, segments = n - 1;
+  const clampCorner = (i: number): number => Math.min(n - 1, Math.max(0, i));
+  const x0 = clampCorner(Math.floor((box.minX + grid.half) / grid.cell) - 1), x1 = clampCorner(Math.ceil((box.maxX + grid.half) / grid.cell) + 1);
+  const y0 = clampCorner(Math.floor((grid.half - box.maxY) / grid.cell) - 1), y1 = clampCorner(Math.ceil((grid.half - box.minY) / grid.cell) + 1);
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  const out = { x0, y0, w, h, corners: new Float64Array(w * h), diagonals: new Uint8Array((w - 1) * (h - 1)) };
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) out.corners[i + j * w] = corners[x0 + i + (y0 + j) * n] as number;
+  for (let j = 0; j < h - 1; j++) for (let i = 0; i < w - 1; i++) out.diagonals[i + j * (w - 1)] = diagonals[x0 + i + (y0 + j) * segments] as number;
+  return out;
+}
+
+/** `sampleCorners` over a window of the corners: the same number, or undefined when the point's cell is not in it. */
+export function sampleWindow(grid: Pick<CornerGrid, 'n' | 'cell' | 'half'>, window: CornerWindow, x: number, y: number): number | undefined {
+  return sampleIn(grid, window.corners, window.diagonals, x, y, window.x0, window.y0, window.w, window.h);
+}
+
+/** The drawn height at a point over corners x0..x0+w-1 across, y0..y0+h-1 down of the plate's grid; undefined off them. */
+function sampleIn(grid: Pick<CornerGrid, 'n' | 'cell' | 'half'>, corners: ArrayLike<number>, diagonals: ArrayLike<number>, x: number, y: number,
+  x0: number, y0: number, w: number, h: number): number | undefined {
+  const segments = grid.n - 1;
   // `PlaneGeometry` lays its rows from +y downwards, so the row index grows as world y falls.
   const gx = (x + grid.half) / grid.cell;
   const gy = (grid.half - y) / grid.cell;
@@ -84,12 +117,14 @@ export function sampleCorners(grid: Pick<CornerGrid, 'n' | 'cell' | 'half'>, cor
   const iy = Math.min(segments - 1, Math.floor(gy));
   const u = gx - ix;
   const v = gy - iy;
-  const a = corners[ix + iy * n] as number;
-  const b = corners[ix + (iy + 1) * n] as number;
-  const c = corners[ix + 1 + (iy + 1) * n] as number;
-  const d = corners[ix + 1 + iy * n] as number;
+  const i = ix - x0, j = iy - y0;
+  if (i < 0 || j < 0 || i + 1 >= w || j + 1 >= h) return undefined;
+  const a = corners[i + j * w] as number;
+  const b = corners[i + (j + 1) * w] as number;
+  const c = corners[i + 1 + (j + 1) * w] as number;
+  const d = corners[i + 1 + j * w] as number;
   // Each cell is split along the diagonal it is DRAWN with (`retriangulate`): b-d into (a, b, d) and (b, c, d), or a-c into
-  if (diagonals[ix + iy * segments]) {
+  if (diagonals[i + j * (w - 1)]) {
     return u >= v ? a * (1 - u) + d * (u - v) + c * v : a * (1 - v) + b * (v - u) + c * u;
   }
   return u + v <= 1 ? a * (1 - u - v) + d * u + b * v : b * (1 - u) + c * (u + v - 1) + d * (1 - v);

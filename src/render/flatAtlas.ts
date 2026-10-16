@@ -733,6 +733,12 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       }
       return [...out.values()];
     },
+    packHeights(rect) {
+      // A plate not made is read bare (`ask`): its relief, not its corners; nothing is made for the asking.
+      const p = plates[plateOf((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)]!;
+      const corners = p.surface?.packCorners?.({ minX: rect[0] - p.cx, minY: rect[1] - p.cy, maxX: rect[2] - p.cx, maxY: rect[3] - p.cy }) ?? null;
+      return { plate: p.index, cx: p.cx, cy: p.cy, base: TERRAIN_BASE, relief: seenRelief, corners };
+    },
     regionOf(box) {
       const p = plates[plateOf((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)]!;
       return encode(p, ensure(p).regionOf([box[0] - p.cx, box[1] - p.cy, box[2] - p.cx, box[3] - p.cy]));

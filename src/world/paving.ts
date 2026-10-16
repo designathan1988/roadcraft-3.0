@@ -34,15 +34,20 @@ export interface PavingSource {
   readonly pack?: (rect: readonly [number, number, number, number]) => { data: PavingData; transfer: ArrayBuffer[] } | null;
 }
 
-/** The paving's height over `PavingData` */
-export function pavingReader(data: PavingData): (x: number, y: number) => number | undefined {
+/** The paving's height over `PavingData`; `groundAt`: the ground the roads' field reads, where it is known (the page is asked elsewhere) */
+export function pavingReader(data: PavingData, groundAt?: (x: number, y: number) => number | undefined): (x: number, y: number) => number | undefined {
   const [x0, y0, x1, y1] = data.rect;
   const inside = (x: number, y: number): boolean => x >= x0 && x <= x1 && y >= y0 && y <= y1;
   if (!data.field) return (x, y) => (inside(x, y) ? NaN : undefined);
   /** The roads at grade: the paving's filter, as the page's (`GROUND_ONLY`). */
   const ground: ReadonlySet<RoadStructure> = new Set<RoadStructure>(['ground']);
   let missed = false;
-  const field = fieldOf(data.field, () => { missed = true; return NaN; });
+  const field = fieldOf(data.field, (x, y) => {
+    const land = groundAt?.(x, y);
+    if (land !== undefined) return land;
+    missed = true;
+    return NaN;
+  });
   const share = data.flush ? flushShareOf(data.flush) : null;
   const riseAt = (x: number, y: number): number => (share ? FOOTWAY_RISE * share(x, y) : FOOTWAY_RISE);
   /** Points whose reading needed the ground: the field remembers their NaN (`roadField.ts` `last`), so never read here again. */

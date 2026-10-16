@@ -66,6 +66,7 @@ import { RoadTilePool } from './roadTilePool';
 import { GroundShapePool } from './groundShapePool';
 import { type BlockDigestAsk, type GroundShapeAsk, type PlateShapeAnswer, blockDigest, cornerBoxes, shapeGroundAsk } from './groundShape';
 import { shapeBoth } from './terrainShaping';
+import { type HeightTile, heightTileBuffers } from './heightTile';
 import { PLANT_MAP_ZOOM, PLANT_NEAR_ZOOM, createSceneryKit, plantSamples, type SceneryKit } from './scenery';
 import { createStreetFurniture } from './streetFurnitureLayer';
 import { createGardens, type GardenPlant, type Gardens } from './gardens';
@@ -310,6 +311,8 @@ export interface SceneHandle {
   surfaceHeightAt(x: number, y: number): number;
   /** The height of the paving at a point - footway or carriageway of a road at grade - or NaN off the roads. */
   pavedHeightAt(x: number, y: number): number;
+  /** The ground as drawn and the paving over a world box, for a worker to read as `terrainHeightAt` and `pavedHeightAt` (`heightTile.ts`). */
+  heightTile(rect: readonly [number, number, number, number]): { readonly tile: HeightTile; readonly transfer: ArrayBuffer[] };
   resize(): void;
   draw(net: Network, sim: SimMirror, alpha: number, delta: number, options?: DrawOptions): void;
   /** Where the last frame drawn looked (`draw`): the simulation's people and traffic live round it. */
@@ -2088,6 +2091,11 @@ export function createSceneRenderer(
       return top;
     },
     pavedHeightAt,
+    heightTile(rect) {
+      const paving = pavedHeightAt.pack?.(rect) ?? null;
+      const tile: HeightTile = { terrain: terrain.packHeights?.(rect) ?? null, paving: paving?.data ?? null };
+      return { tile, transfer: [...heightTileBuffers(tile), ...paving?.transfer ?? []] };
+    },
     setBuildingPreview(preview) {
       buildings.setPreview(preview);
     },
