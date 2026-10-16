@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ForkMap } from '@core/forkMap';
+import { ForkMap, ForkSet } from '@core/forkMap';
 
 /** A MAP LAID OVER ANOTHER READS AS A COPY OF IT GIVEN THE SAME WRITES (`core/forkMap.ts`) */
 function random(seed: number): () => number {
@@ -57,4 +57,27 @@ describe('ForkMap', () => {
     fork.applyTo(below);
     expect([...below]).toEqual([[2, 'c'], [5, 'd']]);
   });
+});
+
+describe('ForkSet', () => {
+  for (const seed of [1, 2, 3, 4]) {
+    it(`reads as a copy given the same writes, in the same order, and takes back as one (seed ${seed})`, () => {
+      const rand = random(seed);
+      const below = new Set<number>();
+      for (let i = 0; i < 40; i++) below.add(Math.floor(rand() * 60));
+      const frozen = [...below];
+      const copy = new Set(below);
+      const fork = new ForkSet(below);
+      for (let step = 0; step < 300; step++) {
+        const key = Math.floor(rand() * 80);
+        if (rand() < 0.5) { copy.add(key); fork.add(key); } else expect(fork.delete(key)).toBe(copy.delete(key));
+        expect(fork.has(key)).toBe(copy.has(key));
+        expect(fork.size).toBe(copy.size);
+      }
+      expect([...fork]).toEqual([...copy]);
+      expect([...below]).toEqual(frozen);
+      fork.applyTo(below);
+      expect([...below]).toEqual([...copy]);
+    });
+  }
 });

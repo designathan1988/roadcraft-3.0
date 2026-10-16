@@ -1,6 +1,7 @@
 import type { ChangeRect } from './changes';
 import { m } from './units';
 import { uniqueCounter } from '@core/identityMemo';
+import { ForkMap } from '@core/forkMap';
 
 /** THE WORLD'S CELLS: one fixed grid over the plane the map is laid on, the partition an edit's cost is measured in */
 
@@ -45,9 +46,11 @@ export class CellFiling<Id extends number, T extends object> {
   /** `side`: the side of its cells, world units - the world's cell by default */
   constructor(private readonly side = CELL) {}
 
-  private readonly entries = new Map<Id, { readonly item: T; readonly rect: ChangeRect; readonly cells: readonly number[] }>();
-  private readonly byCell = new Map<number, Set<Id>>();
-  private readonly versions = new Map<number, number>();
+  private entries = new Map<Id, { readonly item: T; readonly rect: ChangeRect; readonly cells: readonly number[] }>();
+  private byCell = new Map<number, Set<Id>>();
+  private versions = new Map<number, number>();
+  /** The filing this one is a working copy over (`fork`), never written while the copy stands. */
+  private below: CellFiling<Id, T> | null = null;
   /** Moves whenever any cell's version does: the clock's reading at the latest change. */
   epoch = 0;
 
@@ -64,9 +67,7 @@ export class CellFiling<Id extends number, T extends object> {
     const cells: number[] = [];
     forCellsOver(rect, (key) => {
       cells.push(key);
-      let set = this.byCell.get(key);
-      if (!set) this.byCell.set(key, set = new Set());
-      set.add(id);
+      this.ownCell(key).add(id);
       this.bump(key);
     }, this.side);
     this.entries.set(id, { item, rect, cells });
@@ -141,21 +142,67 @@ export class CellFiling<Id extends number, T extends object> {
     return text;
   }
 
-  /** A copy filing the same things (`Network.adopt`). */
+  /** A copy filing the same things (a document's indices by place copied for a working copy's first write). */
   copyFrom(other: CellFiling<Id, T>): void {
     if (other.side !== this.side) throw new Error(`CellFiling: cells of ${other.side} copied into cells of ${this.side}`);
+    this.entries = new Map(other.entries);
+    this.byCell = new Map();
+    for (const [key, set] of other.byCell) this.byCell.set(key, new Set(set));
+    this.versions = new Map(other.versions);
+    this.below = null;
+    this.epoch = other.epoch;
+  }
+
+  /** Files nothing: the next filing starts from an empty one. */
+  clear(): void {
     this.entries.clear();
     this.byCell.clear();
     this.versions.clear();
-    for (const [id, entry] of other.entries) this.entries.set(id, entry);
-    for (const [key, set] of other.byCell) this.byCell.set(key, new Set(set));
-    for (const [key, version] of other.versions) this.versions.set(key, version);
-    this.epoch = other.epoch;
+    this.epoch = 0;
+  }
+
+  /** DO NOT copy the filing for an edit (`copyFrom`): a working copy over this one (`Network.fork`), costing what it files */
+  fork(): CellFiling<Id, T> {
+    const copy = new CellFiling<Id, T>(this.side);
+    copy.entries = new ForkMap(this.entries);
+    copy.byCell = new ForkMap(this.byCell);
+    copy.versions = new ForkMap(this.versions);
+    copy.below = this;
+    copy.epoch = this.epoch;
+    return copy;
+  }
+
+  /** Whether this filing is a working copy over `other` (`fork`) not yet taken back. */
+  isForkOf(other: CellFiling<Id, T>): boolean {
+    return this.below === other;
+  }
+
+  /** Takes back what a working copy of this filing (`fork`) filed and took out; the copy is spent. */
+  takeBack(copy: CellFiling<Id, T>): void {
+    if (copy.below !== this) throw new Error('CellFiling.takeBack: not a working copy of this filing');
+    (copy.entries as ForkMap<Id, { readonly item: T; readonly rect: ChangeRect; readonly cells: readonly number[] }>).applyTo(this.entries);
+    (copy.byCell as ForkMap<number, Set<Id>>).applyTo(this.byCell);
+    (copy.versions as ForkMap<number, number>).applyTo(this.versions);
+    this.epoch = copy.epoch;
+    copy.below = null;
+  }
+
+  /** A cell's set to add to: one made when there is none (`cellToWrite`). */
+  private ownCell(key: number): Set<Id> {
+    let set = this.cellToWrite(key);
+    if (!set) this.byCell.set(key, set = new Set());
+    return set;
+  }
+
+  /** A cell's set to change in place: a working copy's own, copied from the one below the first time (`fork`). */
+  private cellToWrite(key: number): Set<Id> | undefined {
+    const map = this.byCell;
+    return map instanceof ForkMap ? (map as ForkMap<number, Set<Id>>).writable(key, (below) => new Set(below)) : map.get(key);
   }
 
   private unfile(id: Id, cells: readonly number[]): void {
     for (const key of cells) {
-      const set = this.byCell.get(key);
+      const set = this.cellToWrite(key);
       if (!set) continue;
       set.delete(id);
       if (set.size === 0) this.byCell.delete(key);

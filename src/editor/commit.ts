@@ -23,7 +23,7 @@ import { ROAD_TYPES } from '@world/roadTypes';
 import { roadStructure, type RoadStructure } from '@world/structures';
 import { type Anchor, ribbonsNear } from './snap';
 import type { RoadPathPiece } from './roadPath';
-import { type RoadEditRefusal, refuseRoadEdit, snapshotRoads } from './editRules';
+import { type RoadEditRefusal, refuseRoadEdit } from './editRules';
 import { roadsBefore, settleRoadEdit } from './roads/economy';
 import { COARSE_EPS, EPS } from '@core/scalar';
 
@@ -82,12 +82,11 @@ export function commitRoadPath(
   // Each step of a road drawn timed (`hitch:` entries).
   let lap = performance.now();
   const timed = (what: string): void => { const now = performance.now(); performance.measure(`hitch:commit/${what}`, { start: lap, end: now }); lap = now; };
-  // DO NOT copy the map to judge against when the network is behind (`snapshotRoads`)
+  // DO NOT copy the map to judge against when the network is behind
   if (net.revision !== doc.revision) net.rebuild();
   const work = doc.fork();
   timed('fork');
-  const workNet = new Network(work);
-  workNet.adopt(net);
+  const workNet = net.fork(work);
   timed('network');
   let committed = false;
   let heightLimited = false;
@@ -140,7 +139,7 @@ export function commitRoadPath(
     return { committed: true, heightLimited, finalHeightOffset: currentHeight, cost: charge.amount, stations };
   }
   doc.takeBack(work);
-  net.adopt(workNet);
+  net.takeBack(workNet);
   timed('replace');
   return { committed: true, heightLimited, finalHeightOffset: currentHeight, cost: charge.amount,
     ...(!bore.bored && ground && bore.elevation ? { elevation: bore.elevation } : {}) };
@@ -310,22 +309,20 @@ export function commitDraft(
   // Flattened as a whole BEFORE it is cut at crossings
   const shape = fitRoadCurve(start.at, end.at, curve, type);
 
+  // DO NOT copy the map to judge against when the network is behind (`Network.fork` catches it up)
   const work = doc.fork();
-  const workNet = new Network(work);
-  workNet.seedJunctions(net);
-  workNet.rebuild();
-  const before = net.revision === doc.revision ? { doc, net } : snapshotRoads(doc, net);
+  const workNet = net.fork(work);
   const result = commitDraftInPlace(work, workNet, start, end, type, shape, structure);
   if (!result.committed) return result;
   // `workNet` was last built BEFORE the draft's segments were added
   workNet.rebuild();
-  const refused = refuseRoadEdit(before, { doc: work, net: workNet });
+  const refused = refuseRoadEdit({ doc, net }, { doc: work, net: workNet });
   if (refused) return { committed: false, reason: refused };
   const charge = settleRoadEdit(roadsBefore(doc), work);
   if (!charge.affordable) return { committed: false, reason: 'funds', cost: charge.amount };
 
   doc.takeBack(work);
-  net.adopt(workNet);
+  net.takeBack(workNet);
   return { ...result, cost: charge.amount };
 }
 
@@ -705,8 +702,7 @@ export function moveNodeChecked(doc: RoadDoc, net: Network, id: NodeId, to: Vec2
   // Made on a working copy (`RoadDoc.fork`) and judged against the map as it stands, as a drawn road is
   if (net.revision !== doc.revision) throw new Error('moveNodeChecked: the network is not built for the document as it stands');
   const work = doc.fork();
-  const workNet = new Network(work);
-  workNet.adopt(net);
+  const workNet = net.fork(work);
   if (!work.moveNode(id, to)) return { committed: false, reason: 'duplicate' };
   // `workNet` stands as before the move: the roads that did not move are filed where they are.
   const result = reconcileMovedNode(work, workNet, id);
@@ -718,7 +714,7 @@ export function moveNodeChecked(doc: RoadDoc, net: Network, id: NodeId, to: Vec2
   const charge = settleRoadEdit(roadsBefore(doc), work);
   if (!charge.affordable) return { committed: false, reason: 'funds', cost: charge.amount };
   doc.takeBack(work);
-  net.adopt(workNet);
+  net.takeBack(workNet);
   return { ...result, cost: charge.amount };
 }
 

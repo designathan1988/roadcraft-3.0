@@ -75,11 +75,10 @@ export function commitRoundabout(
     if (!segment) return { committed: false, reason: 'geometry' };
     entrances.push(segment.id);
   }
-  const workNet = new Network(work);
-  workNet.seedJunctions(net);
+  const workNet = net.fork(work);
   workNet.rebuild();
   if (nodes.some((id) => workNet.impossible.has(id))) return { committed: false, reason: 'geometry' };
   doc.takeBack(work);
-  net.adopt(workNet);
+  net.takeBack(workNet);
   return { committed: true, ring, entrances };
 }

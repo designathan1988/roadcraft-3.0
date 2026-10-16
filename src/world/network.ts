@@ -24,6 +24,7 @@ import { NetworkBuild } from './networkBuild';
 import type { SegmentRibbon, SegmentTrims } from './ribbons';
 import { DeltaLog, type NetworkDelta } from './networkDelta';
 import type { PoleLineState } from './poleLines';
+import { ForkMap, ForkSet } from '@core/forkMap';
 
 /** A `hitch:` entry for the frame monitor, where the platform measures. */
 function measureHitch(name: string, start: number): void {
@@ -52,13 +53,13 @@ export class Network {
   private readonly crossingDistances = new Map<SegmentId, Map<NodeId, number>>();
   /** DO NOT work a landing out again for each asker. */
   private readonly crossingLandings = new Map<SegmentId, Map<NodeId, CrossingLanding | null>>();
-  readonly junctions = new Map<NodeId, Map<SurfaceLevel, Junction>>();
-  readonly ribbons = new Map<SegmentId, SegmentRibbon>();
+  readonly junctions: Map<NodeId, Map<SurfaceLevel, Junction>>;
+  readonly ribbons: Map<SegmentId, SegmentRibbon>;
   /** The ribbons and the junctions filed by the cells their surfaces reach (`world/cells.ts`) */
-  readonly segmentCells = new CellFiling<SegmentId, SegmentRibbon>();
-  readonly junctionCells = new CellFiling<NodeId, ReadonlyMap<SurfaceLevel, Junction>>();
+  readonly segmentCells: CellFiling<SegmentId, SegmentRibbon>;
+  readonly junctionCells: CellFiling<NodeId, ReadonlyMap<SurfaceLevel, Junction>>;
   /** The ribbons with a footway laid flush on a side, filed like `segmentCells` */
-  readonly flushCells = new CellFiling<SegmentId, SegmentRibbon>();
+  readonly flushCells: CellFiling<SegmentId, SegmentRibbon>;
   /** DO NOT go back to a rank of every ribbon made again at each revision (`ribbonOrder`) */
   ribbonsMeeting(rect: ChangeRect): SegmentRibbon[] {
     const out: SegmentRibbon[] = [];
@@ -70,30 +71,55 @@ export class Network {
   }
 
   /** Nodes the editor would refuse to create, with the gap that condemns them, in radians. */
-  readonly impossible = new Map<NodeId, number>();
+  readonly impossible: Map<NodeId, number>;
   /** Junctions whose legs are too short to separate their lanes, with how far */
-  readonly squeezed = new Map<NodeId, number>();
-  readonly trims = new Map<SegmentId, SegmentTrims>();
+  readonly squeezed: Map<NodeId, number>;
+  readonly trims: Map<SegmentId, SegmentTrims>;
   /** How far along each leg a junction's flat plate reaches, keyed `node:segment` */
-  readonly plateReach = new Map<string, number>();
+  readonly plateReach: Map<string, number>;
   /** Nodes where one road carries on at another width, built as a taper rather than as a junction (`junction/transition.ts`). */
-  readonly transitions = new Set<NodeId>();
-  readonly polylines = new PolylineCache();
+  readonly transitions: Set<NodeId>;
+  readonly polylines: PolylineCache;
   /** What the pole lines keep of this network (`poleLines.ts` `PoleLineState`) */
   poleLines: PoleLineState | null = null;
 
+  /** The document's road and traffic revisions at the last rebuild, as one record a working copy takes whole (`fork`). */
+  private built = { roads: -1, traffic: -1 };
   /** Matches `RoadDoc.revision` at the time of the last rebuild. */
-  revision = -1;
+  get revision(): number {
+    return this.built.roads;
+  }
   /** Road plan revision; vertical-only edits leave it unchanged. */
-  trafficRevision = -1;
+  get trafficRevision(): number {
+    return this.built.traffic;
+  }
 
   /** The incremental build: what each piece was made from (`networkBuild.ts`). */
   private readonly build: NetworkBuild;
   /** The states this network has been in and what changed between them (`changesSince`). */
   private readonly log = new DeltaLog();
+  /** The network this one is a working copy over (`fork`), and that network's state then; null once taken back. */
+  private below: { readonly net: Network; readonly state: object } | null = null;
 
-  constructor(readonly doc: RoadDoc) {
+  /** `below`: only `fork` passes it */
+  constructor(readonly doc: RoadDoc, below: Network | null = null) {
     this.build = new NetworkBuild(this);
+    this.junctions = below ? new ForkMap(below.junctions) : new Map();
+    this.ribbons = below ? new ForkMap(below.ribbons) : new Map();
+    this.segmentCells = below ? below.segmentCells.fork() : new CellFiling();
+    this.junctionCells = below ? below.junctionCells.fork() : new CellFiling();
+    this.flushCells = below ? below.flushCells.fork() : new CellFiling();
+    this.impossible = below ? new ForkMap(below.impossible) : new Map();
+    this.squeezed = below ? new ForkMap(below.squeezed) : new Map();
+    this.trims = below ? new ForkMap(below.trims) : new Map();
+    this.plateReach = below ? new ForkMap(below.plateReach) : new Map();
+    this.transitions = below ? new ForkSet(below.transitions) : new Set();
+    this.polylines = below ? below.polylines.fork() : new PolylineCache();
+    if (!below) return;
+    this.build.layOver(below.build);
+    this.log.takeFrom(below.log);
+    this.built = below.built;
+    this.below = { net: below, state: below.log.state };
   }
 
   /** Nodes that carry a junction surface. */
@@ -112,9 +138,13 @@ export class Network {
     const delta = this.build.rebuild();
     this.forgetCrossings(delta);
     this.log.advance(delta);
-    this.revision = this.doc.revision;
-    this.trafficRevision = this.doc.trafficRevision;
+    this.stampBuilt();
     measureHitch(options.full ? 'hitch:network/full' : 'hitch:network/rebuild', started);
+  }
+
+  /** The document's revisions as this network now stands for them. */
+  private stampBuilt(): void {
+    this.built = { roads: this.doc.revision, traffic: this.doc.trafficRevision };
   }
 
   /** What changed since the network was in `state` (a token it handed out, `state`), or null: everything */
@@ -138,25 +168,16 @@ export class Network {
     this.transitions.clear();
     this.impossible.clear();
     this.squeezed.clear();
-    this.segmentCells.copyFrom(new CellFiling());
-    this.junctionCells.copyFrom(new CellFiling());
-    this.flushCells.copyFrom(new CellFiling());
-  }
-
-  /** Takes another network's derived state as the start of its own, without claiming to be up to date */
-  seedJunctions(from: Network): void {
-    this.copyState(from);
-    this.build.copyFrom(from.build, false);
-    this.revision = -1;
-    this.trafficRevision = -1;
+    this.segmentCells.clear();
+    this.junctionCells.clear();
+    this.flushCells.clear();
   }
 
   /** Takes over another network's derived geometry instead of recomputing it. */
   adopt(other: Network): void {
     this.copyState(other);
-    this.build.copyFrom(other.build, true);
-    this.revision = this.doc.revision;
-    this.trafficRevision = this.doc.trafficRevision;
+    this.build.copyFrom(other.build);
+    this.stampBuilt();
   }
 
   private copyState(other: Network): void {
@@ -182,6 +203,39 @@ export class Network {
     this.log.takeFrom(other.log);
     // The crossing caches belong to the geometry just replaced
     this.forgetCrossings(this.log.since(before));
+  }
+
+  /** DO NOT copy the network for an edit (CLAUDE.md, "Rebuilding everything when one part changes") */
+  fork(doc: RoadDoc): Network {
+    if (doc.forkOrigin !== this.doc) throw new Error('Network.fork: the document is not a working copy of this network\'s, as it stands');
+    // A copy over a network behind its document would take back what it never rebuilt: caught up first.
+    if (this.revision !== this.doc.revision || this.trafficRevision !== this.doc.trafficRevision) this.rebuild();
+    return new Network(doc, this);
+  }
+
+  /** Takes back a working copy of this network (`fork`), after its document took back the copy's (`RoadDoc.takeBack`) */
+  takeBack(copy: Network): void {
+    const below = copy.below;
+    if (below?.net !== this) throw new Error('Network.takeBack: not a working copy of this network');
+    if (below.state !== this.log.state) throw new Error('Network.takeBack: this network was rebuilt after the copy was made');
+    (copy.junctions as ForkMap<NodeId, Map<SurfaceLevel, Junction>>).applyTo(this.junctions);
+    (copy.ribbons as ForkMap<SegmentId, SegmentRibbon>).applyTo(this.ribbons);
+    this.segmentCells.takeBack(copy.segmentCells);
+    this.junctionCells.takeBack(copy.junctionCells);
+    this.flushCells.takeBack(copy.flushCells);
+    (copy.impossible as ForkMap<NodeId, number>).applyTo(this.impossible);
+    (copy.squeezed as ForkMap<NodeId, number>).applyTo(this.squeezed);
+    (copy.trims as ForkMap<SegmentId, SegmentTrims>).applyTo(this.trims);
+    (copy.plateReach as ForkMap<string, number>).applyTo(this.plateReach);
+    (copy.transitions as ForkSet<NodeId>).applyTo(this.transitions);
+    this.polylines.takeBack(copy.polylines);
+    this.build.takeBack(copy.build);
+    const before = this.log.state;
+    this.log.takeFrom(copy.log);
+    // The crossing caches belong to the geometry just replaced
+    this.forgetCrossings(this.log.since(before));
+    this.built = copy.built;
+    copy.below = null;
   }
 
   /** Drops the crossing distances a change of the network may have moved */

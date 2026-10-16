@@ -145,7 +145,6 @@
  "whole-map-nested  src/world/roads/streetNames.ts streetNameOf  for RoadDoc.landscape ⊃ nameItemSegment: for Network.ribbons": 1,
  "whole-map-on-revision  src/editor/cityGenerator.ts greenCitySteps  Network.rebuild → NetworkBuild.rebuild → NetworkBuild.findChanges: spread RoadDoc.segments": 1,
  "whole-map-on-revision  src/editor/commit.ts commitRoadPath  Network.rebuild → NetworkBuild.rebuild → NetworkBuild.findChanges: spread RoadDoc.segments": 1,
- "whole-map-on-revision  src/editor/commit.ts commitRoadPath  Network.seedJunctions → Network.copyState: for Network.junctions": 1,
  "whole-map-on-revision  src/editor/editRules.ts guardRoadEdit  Network.rebuild → NetworkBuild.rebuild → NetworkBuild.findChanges: spread RoadDoc.segments": 1,
  "whole-map-on-revision  src/editor/editRules.ts snapshotRoads  Network.rebuild → NetworkBuild.rebuild → NetworkBuild.findChanges: spread RoadDoc.segments": 1,
  "whole-map-on-revision  src/editor/history.ts followNetwork  Network.rebuild → NetworkBuild.rebuild → NetworkBuild.findChanges: spread RoadDoc.segments": 1,

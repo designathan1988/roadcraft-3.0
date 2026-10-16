@@ -59,7 +59,7 @@ export function refuseRoadEdit(before: RoadState, after: RoadState): RoadEditRef
 }
 
 /** A copy of the roads as they stand, to judge an edit made in place against (`refuseRoadEdit`). */
-export function snapshotRoads(doc: RoadDoc, net: Network): RoadState {
+function snapshotRoads(doc: RoadDoc, net: Network): RoadState {
   const copy = doc.clone();
   const copyNet = new Network(copy);
   if (net.revision === doc.revision) copyNet.adopt(net);

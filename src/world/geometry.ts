@@ -64,10 +64,15 @@ export const segmentStartsAt = (seg: RoadSegment, node: NodeId): boolean =>
 /** Cheap cache of per-segment polylines, rebuilt only for dirty segments. */
 export class PolylineCache {
   private map = new Map<SegmentId, Polyline>();
+  /** The cache this one is a working copy over (`fork`): read where this one holds nothing and has not dropped the road. */
+  private below: PolylineCache | null = null;
+  /** Roads this working copy dropped (`invalidate`, `clear`): never read from below, which may still cache them. */
+  private dropped = new Set<SegmentId>();
+  private droppedAll = false;
 
   /** The segment's centreline. */
   get(doc: RoadDoc, id: SegmentId): Polyline {
-    let pl = this.map.get(id);
+    let pl = this.map.get(id) ?? this.fromBelow(id);
     if (!pl) {
       pl = segmentPolyline(doc, doc.requireSegment(id));
       this.map.set(id, pl);
@@ -77,10 +82,13 @@ export class PolylineCache {
 
   invalidate(id: SegmentId): void {
     this.map.delete(id);
+    if (this.below) this.dropped.add(id);
   }
 
   clear(): void {
     this.map.clear();
+    this.dropped.clear();
+    this.droppedAll = this.below !== null;
   }
 
   /** Takes over another cache's entries. */
@@ -89,7 +97,30 @@ export class PolylineCache {
     for (const [id, pl] of other.map) this.map.set(id, pl);
   }
 
-  get size(): number {
-    return this.map.size;
+  /** DO NOT copy the cache for an edit: a working copy over this one (`Network.fork`) */
+  fork(): PolylineCache {
+    const copy = new PolylineCache();
+    copy.below = this;
+    return copy;
+  }
+
+  /** Takes back what a working copy of this cache (`fork`) dropped and made; the copy is spent. */
+  takeBack(copy: PolylineCache): void {
+    if (copy.below !== this) throw new Error('PolylineCache.takeBack: not a working copy of this cache');
+    if (copy.droppedAll) this.clear();
+    for (const id of copy.dropped) this.invalidate(id);
+    for (const [id, pl] of copy.map) this.map.set(id, pl);
+    copy.below = null;
+  }
+
+  /** What the cache below holds for a road this copy has not dropped (it never makes one there). */
+  private fromBelow(id: SegmentId): Polyline | undefined {
+    if (!this.below || this.droppedAll || this.dropped.has(id)) return undefined;
+    return this.below.peek(id);
+  }
+
+  /** The centreline held for a road, made by nobody. */
+  private peek(id: SegmentId): Polyline | undefined {
+    return this.map.get(id) ?? this.fromBelow(id);
   }
 }
