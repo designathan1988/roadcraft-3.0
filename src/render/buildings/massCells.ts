@@ -29,6 +29,11 @@ interface Cell {
   near: boolean;
 }
 
+/** The farthest a cell may be drawn near in perspective, world units: where its far level's error falls to `NEAR_PIXELS`. */
+export function nearReach(pxAtMetre: number): number {
+  return (FAR_ERROR * pxAtMetre) / NEAR_PIXELS;
+}
+
 export interface MassCells {
   readonly group: Group;
   /** A cell whose masses are asked (new, or its buildings changed): kept as it stands until they come (`land`) */
@@ -176,7 +181,7 @@ export function createMassCells(kit: BuildingKit, cellSize: number): MassCells {
       // A far cell comes near only within the farthest a near cell may be on the map
       const within = allNear === true ? Infinity
         : orthoPx !== null ? (FAR_ERROR * orthoPx >= NEAR_PIXELS ? reach : 0)
-          : Math.min(reach, (FAR_ERROR * pxAtMetre) / NEAR_PIXELS);
+          : Math.min(reach, nearReach(pxAtMetre));
       if (within <= 0) return;
       const r = within + overhang;
       const i0 = Math.floor((eyeX - r) / cellSize), i1 = Math.floor((eyeX + r) / cellSize);

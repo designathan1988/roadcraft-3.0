@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Mesh, Object3D } from 'three';
+import { Box3, type Mesh, type Object3D } from 'three';
 
 import { beginFrameWork } from '@core/frameWork';
 import { createBuildingLayer } from '@render/buildings/layer';
@@ -120,5 +120,41 @@ describe('the buildings layer, a change at a time', () => {
     expect(walked).toBe(0);
     expect(worn()).toBeCloseTo(0.9, 5);
     live.dispose();
+  });
+});
+
+describe('the buildings layer by the eye', () => {
+  it('lets go of the detail of the cells left far behind in perspective, and brings it back on return', () => {
+    const doc = new RoadDoc();
+    // Two districts 4 km apart, nine buildings each.
+    for (const ox of [0, m(4000)]) for (let i = 0; i < 9; i++) doc.buildings.add(body(i, ox + (i % 3) * SPACING, Math.floor(i / 3) * SPACING));
+    const layer = createBuildingLayer();
+    const pxAtMetre = 1080 / (2 * Math.tan((35 * Math.PI) / 360));
+    /** The eye 150 m up over a point: the detail meshes resident then, by the district they stand in (three's x is the world's). */
+    const lookAt = (x: number): { first: number; second: number } => {
+      for (let frame = 0; frame < 5000; frame++) {
+        beginFrameWork();
+        layer.levelOfDetail(x, m(-200), m(150), pxAtMetre, null);
+        layer.update(doc, flat, 'g');
+        if (!layer.pending) break;
+      }
+      const out = { first: 0, second: 0 };
+      layer.group.updateMatrixWorld(true);
+      layer.group.traverse((o) => {
+        if (!(o as Mesh).isMesh || o.parent?.name !== 'buildings') return;
+        const box = new Box3().setFromObject(o);
+        if (box.isEmpty()) return;
+        if ((box.min.x + box.max.x) / 2 < m(2000)) out.first++; else out.second++;
+      });
+      return out;
+    };
+    const atFirst = lookAt(m(70));
+    expect(atFirst.first).toBeGreaterThan(0);
+    const atSecond = lookAt(m(4070));
+    expect(atSecond.second).toBeGreaterThan(0);
+    // 4 km behind: past twice the farthest a cell is drawn near (1.3 km at 1,080 pixels high).
+    expect(atSecond.first).toBe(0);
+    expect(lookAt(m(70))).toEqual({ first: atFirst.first, second: 0 });
+    layer.dispose();
   });
 });

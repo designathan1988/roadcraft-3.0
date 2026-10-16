@@ -99,10 +99,6 @@ Read by agents on `fix/workers-10km` at `3780807` (quick read; line numbers from
 bytes and ms are estimates from reading). Re-check the line before fixing.
 
 GPU memory and drawing
-- Building detail residency has no cap: in perspective `reach = Infinity` (`renderer.ts:3196`) and
-  the only eviction needs `Number.isFinite(reach)` (`buildings/layer.ts:656`); video memory grows
-  with the area visited and a returning cell is re-emitted. Fix: residency by a byte budget; what
-  leaves falls back to the mass and returns without redoing.
 - Render targets and shadow map are not counted (`core/perfBudget.ts:196` passes `null`).
 - `color`/`roadSection` attributes on every road strip (`mesh/surfaceMesh.ts:68`, `tileMesh.ts:83`):
   24 of 56 B per vertex unused. Fix: the `SurfaceSpec` declares what it reads.

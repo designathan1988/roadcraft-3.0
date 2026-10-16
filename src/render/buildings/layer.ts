@@ -15,7 +15,7 @@ import {
 import { type FlagInstance, createFlagLayer } from './flagLayer';
 import { TownIndex, patchCell, signatureBodies } from './townIndex';
 import { fadeMeshes } from './fade';
-import { createMassCells } from './massCells';
+import { createMassCells, nearReach } from './massCells';
 import { type BuildingKit, type PartKind, createBuildingKit } from './kit';
 import { type CellEnv, CellPool } from './cellPool';
 import { CellRequests, sameEntries } from './cellRequests';
@@ -558,9 +558,11 @@ export function createBuildingLayer(): BuildingLayer {
       for (const key of shownNear) if (!now.has(key)) cells.get(key)?.part.setVisible(false);
       for (const key of now) if (!shownNear.has(key)) cells.get(key)?.part.setVisible(true);
       shownNear = now;
-      if (Number.isFinite(reach) && (Math.hypot(eyeX - residentFrom.x, eyeY - residentFrom.y) > reach / 4 || reach !== residentFrom.reach)) {
-        residentFrom = { x: eyeX, y: eyeY, reach };
-        const keep = reach * RESIDENT_REACH;
+      // DO NOT keep the detail of every cell once seen in perspective: video memory grew with the area visited (2026-10-16).
+      const resident = Number.isFinite(reach) ? reach : orthoPx === null ? nearReach(pxAtMetre) : Infinity;
+      if (Number.isFinite(resident) && (Math.hypot(eyeX - residentFrom.x, eyeY - residentFrom.y) > resident / 4 || resident !== residentFrom.reach)) {
+        residentFrom = { x: eyeX, y: eyeY, reach: resident };
+        const keep = resident * RESIDENT_REACH;
         for (const key of [...cells.keys()]) {
           if (now.has(key) || pendingCells.has(key)) continue;
           const comma = key.indexOf(',');
