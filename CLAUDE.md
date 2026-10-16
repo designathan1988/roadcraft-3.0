@@ -100,68 +100,48 @@ cause, technique and source). Git history is the archive.
 - The fixed map today: 5 × 5 plates of 2,048 m (`world/bounds.ts`).
 
 ## Open findings
-Read by agents on `fix/workers-10km` at `3780807` (quick read; line numbers from that commit;
-bytes and ms are estimates from reading). Re-check the line before fixing.
+Line numbers are from the reading that found them: re-check the line before fixing.
 
 GPU memory and drawing
-- `color`/`roadSection` attributes on every road strip (`mesh/surfaceMesh.ts:68`, `tileMesh.ts:83`):
-  24 of 56 B per vertex unused. Fix: the `SurfaceSpec` declares what it reads.
-- Garden buffers sized to the whole city, never shrink; body and card stores keep the same matrices
-  (`gardens.ts:281-287, 512, 516`).
 - Vehicle models non-indexed (`vehicleModels.ts` `merge`): index them only with the wreck
   (`agents.ts`, normals recomputed after denting) keeping its own non-indexed copy.
 - Whole-map dense grids from boot, quadratic in the map's side: the wear texture (`wear.ts`, 2048²
   RGBA = 17 MB, 5 m texels) and the terrain's fields (ecology, gullies, light, wetness, heights,
   ~6-7 MB each, ~70 MB). Fix for a larger map: sparse tiles where there is something.
 - About 43 draw calls per building cell: a mesh per finish and an `InstancedMesh` per part kind
-  (`buildingMesh.ts:3531, 3573`).
-- Needs shots and the player's yes: signature buildings without a far level (`massing.ts:157`);
-  terrain plates with content have no LOD (`flatAtlas.ts:104`).
+  (`buildingMesh.ts` `meshesOf`).
+- Terrain plates with roads, buildings, stamps or paint are built on the page at opening and stay
+  whole on the GPU (~12-21 MB a plate, estimated); a returning empty plate rebuilds its GPU objects.
+  Fix: GPU data only for plates in view (a pool), built off the page.
+- Needs shots: signature buildings without a far level (`massing.ts` `emitMassing`, few per city).
 
 Main thread
 - The simulation's worker (`sim.worker.ts`) keeps a whole copy of every building record
   (`world/replica.ts`): the agents read few of their fields. Fix: a record of what the sim reads.
 - The page still rebuilds the network for drawing, and the worker its own from the replica.
-- City growth and power-line layout are sliced (`main.ts:2200-2273` `GROW_SLICE_MS`,
-  `roads/powerLine.ts:39`): amortization. The worker version is on `fix/growth-worker`.
-- Nature: one plate swept per frame (`renderer.ts:2359-2393`) and `new CandidateKeep` with every
-  tree (`:3045`).
-- Scene scan for shader variants every 2 s, compiling during play (`renderer.ts:3112`). Fix: a
-  closed variant catalogue compiled at load.
-- Opening: `net.rebuild({ full: true })` (`history.ts:155`); `readDerivedAll` reads the whole cache
-  (`renderer.ts:792`).
-- Profiler hooks always installed (`main.ts:707`, `profiler.ts:88`, `new Error().stack` per upload).
+- City growth is sliced on the page (`main.ts` `growCity`, `GROW_SLICE_MS`; `growZones`):
+  amortization; ~2.5 ms a building, flat profile. Fix: a growth worker on a diary-fed copy.
+- The lot proposal is a whole-map plan spread across frames (`planLotsSteps`).
+- 13 global-revision reads left in `renderer.ts` (the world-rebuild trigger and `gradedFor`).
+- Shaders are compiled at each map load from one walk of the scene (`renderer.ts`); watch for a
+  first-time hitch on rain, trains, signals, explosions and a quality change.
 
 O(map) per edit
 - `snapshotRoads` does `doc.clone()` (`editRules.ts:114`) per in-place edit. Fix: judge on `doc.fork()`.
 - `Network.adopt` copies the whole network (`network.ts:270-300`), twice per road drawn. Fix: a
   layered fork, adopting only the delta.
 - `elevation.ts` walks every ribbon per solve (`:448`) and digests with `JSON.stringify` (`:1177`).
-- Autosave: `dirtyHead` rewrites the whole head (`chunkedSave.ts:133, 179`); under 3,000 buildings
-  `persistence.ts:188` writes the whole document. Fix: head in parts by the diary, written in a worker.
-- Undo: `DocImage` `structuredClone`s nodes, segments, poles, landscape and barriers
-  (`docImage.ts:83, 117`), compares lists by prefix/suffix (`:186`); `doc.ts:2086` logs
-  `'utilities'` without ids. 28 `JSON.stringify` comparisons in `doc.ts` `replaceContents`.
-- Terrain: a stamp discards the worker-built mesh (`terrain.ts:3125`); `new TerrainIndex` of every
-  stamp per revision (`:3102`); textures and buffers re-uploaded whole (no `addUpdateRange`).
-- `flatAtlas.ts`: each plate filters every paint dab (`:435-444`); `letGo` throws a plate away and
-  it is rebuilt when it returns (`:299-307`).
-- Global-revision derivatives in `renderer.ts`: `coverSweep` (`:2547, 2982`), elements rebuilt
-  whole (`:3535`), planted trees (`:3086`), `watchRoads` copies every ribbon each second (`:1314`).
-- Lot tool: `lotAt` is `doc.lots.find`, up to 400 times per move (`lotTool.ts:359, 552`); the
-  overlay recomposes every lot; the proposal key uses `net.revision` (`:259`). Fix: `doc.lotsIn(box)`.
-- Simulation: `refreshJunctionOrder` sorts every junction per edit (`sim/world.ts:534`);
-  `rebindVehicles` walks the whole fleet (`pipeline.ts:167-200`); every signal, even asleep, each
-  tick (`pipeline.ts:92`); control advisor every 10 s (`controlAdvisor.ts:37`); all stops scanned
+- Undo: the first edit of a session builds a map of references to every record (80-235 ms on the
+  10 km city); lists without ids (paint, trees, elements, fog) take one identity pass and rewrite
+  their autosave section whole. Fix: ids on list items (a save format change).
+- Terrain: the water is rebuilt for the whole plate at a stroke's end; its ground texture is sent
+  whole (r186 partial uploads are RGBA only); a light request copies the plate's heights.
+- Simulation: control advisor every 10 s (`controlAdvisor.ts:37`); all stops scanned
   (`transit/transit.ts:268`); `trainZones` built each tick (`walk.ts:1952`).
 - Fleet copied or scanned per tick in `lotTraffic.ts:156, 269, 309`, `lorryTraffic.ts:136, 247`.
 - The rigged crowd blends palettes on the CPU (`riggedCitizens.ts` `emit`): only the scenery's few
   bodies and `?bodies=cooked`; the default crowd (`proceduralCrowd.ts`) is on the GPU.
-- 188 global-revision reads still suppressed in `scripts/baselines/eslint-suppressions.json` (35
-  files: `renderer.ts` 42, `doc.ts` 23, `flatAtlas.ts` 19, `main.ts` 15, `terrain.ts` 7). The engine
-  has only 6 `engine.register`; the other derived products update themselves.
-- Low: `conflictPool.ts:283` does not `terminate` workers already made when creation fails; files of
-  3,500-4,500 lines (`main.ts`, `renderer.ts`, `buildingMesh.ts`).
+- Files of 3,500-4,500 lines (`main.ts`, `renderer.ts`, `buildingMesh.ts`).
 
 Player's decisions
 - Brush streams kept by dropping the oldest dab past a count (`doc.ts` `addPaintDab`, `addFogDab`,
@@ -183,8 +163,12 @@ Memory measured (heap snapshots, SwiftShader, `scratchpad` probes; 2026-10-16):
 Not checked (need a measure in the game): ~30 MB/s garbage, a road taking 9-10 s, opening the big
 map, 18.6 ms GPU on the whole map, relighting at sun ≥ 2°.
 
-Already fixed on the branch (do not report as open): transit and fog by the diary; gullies
-(`setGullies` is empty); forests cell by cell (`plantCells.ts`); the `no-global-revision` lint;
+Already fixed (do not report as open): transit and fog by the diary; gullies (`setGullies` gone);
+forests, covers, river stones, planted trees and elements cell by cell by the diary
+(`candidateKeep.ts` `CellKeep`, `plantPlaces.ts`); the undo image by reference and the autosave
+head in parts (manifest 4); terrain stamps and paint by box and by plate; the lot tool by index;
+gardens, furniture and poles in view only (`instanceRuns.ts`, pixel cut for poles); profiler
+hooks only while shown; the opening reads only the road tiles it needs; the `no-global-revision` lint;
 chunk LRU cache; atlas `CACHE = 6`; lot tool JSON key; road tiles without CPU arrays; `pedPoseInto`;
 lanelets by delta; cell emission in a worker (`cellPool.ts`); parking walls by `store.near`;
 `matrixAutoUpdate = false` on buildings; `changedSites` and `changedSegments` by the diary; the sky
