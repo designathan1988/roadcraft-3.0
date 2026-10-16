@@ -8,6 +8,7 @@ import { roadProfile, sectionFromProfile } from '@world/roadTypes';
 import { LaneletGraph } from '@world/lanelets';
 import { MEDIAN_UTURN_OPENING, medianNose } from '@world/landscape';
 import { commitUturn } from '@editor/streetObjects';
+import { guardRoadEdit } from '@editor/editRules';
 
 /** A U-TURN THROUGH THE MEDIAN (retorno: a piece the player puts, 2026-10-10). */
 const AVENUE = 2, BOULEVARD = 3;
@@ -52,5 +53,17 @@ describe('a U-turn through the median', () => {
     const beyond = node.incident.find((sg) => sg !== node.uturn)!;
     expect(medianNose(net, beyond, result.node)).toBe(MEDIAN_UTURN_OPENING);
     expect(medianNose(net, node.uturn!, result.node)).toBeLessThan(m(3));
+  });
+
+  it('opened as the inspector opens it, a working copy of the working copy (`guardRoadEdit`): the same road as opened directly', () => {
+    const direct = road(BOULEVARD, 5);
+    expect(commitUturn(direct.doc, direct.net, direct.id, 'b').committed).toBe(true);
+    const guarded = road(BOULEVARD, 5);
+    expect(guardRoadEdit(guarded.doc, guarded.net, (work, workNet) => commitUturn(work, workNet, guarded.id, 'b').committed))
+      .toEqual({ changed: true, refused: null });
+    expect(guarded.doc.toJSON()).toEqual(direct.doc.toJSON());
+    expect([...guarded.net.ribbons.keys()]).toEqual([...direct.net.ribbons.keys()]);
+    expect([...guarded.net.trims]).toEqual([...direct.net.trims]);
+    expect(guarded.net.revision).toBe(guarded.doc.revision);
   });
 });
