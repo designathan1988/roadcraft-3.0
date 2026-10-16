@@ -35,7 +35,12 @@ function fingerprint(root: Object3D): number {
     const geometry = (object as { geometry?: BufferGeometry }).geometry;
     if (!geometry) return;
     digest.addText(object.name);
-    for (const name of ['position', 'normal', 'uv', 'color']) digest.addAll(geometry.getAttribute(name).array);
+    // `color` only where the material reads it (`SurfaceSpec` reads): its presence is part of the fingerprint.
+    for (const name of ['position', 'normal', 'uv', 'color']) {
+      const attribute = geometry.getAttribute(name);
+      digest.addText(attribute ? name : `-${name}`);
+      if (attribute) digest.addAll(attribute.array);
+    }
     digest.addAll(geometry.getIndex()!.array);
   });
   return digest.value();
