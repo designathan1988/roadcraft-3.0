@@ -302,17 +302,19 @@ export function createElementLayer(kit: ElementKit): ElementLayer {
     if (run.size) { drawn.set(cell, run); added.push(run); }
     if (mine.length) { emitters.set(cell, mine); emitting += mine.length; }
   };
+  /** @rebuild Every element's cell, and every cell drawn: a map opened, or a change the diary cannot place. */
+  const everyCell = (doc: ElementSource, cells: Set<number>): void => {
+    for (const cell of drawn.keys()) cells.add(cell);
+    for (const cell of emitters.keys()) cells.add(cell);
+    for (const item of doc.elements) cells.add(keepCellAt(item.x, item.y));
+  };
   return {
     group: runs.group,
     get triangles() { return runs.triangles; },
     sync(changes, doc, groundAt) {
       const cells = new Set<number>();
-      if (changes.items === null || changes.ground === null) {
-        /** @rebuild Every element: a map opened, or a change the diary cannot place. */
-        for (const cell of drawn.keys()) cells.add(cell);
-        for (const cell of emitters.keys()) cells.add(cell);
-        for (const item of doc.elements) cells.add(keepCellAt(item.x, item.y));
-      } else {
+      if (changes.items === null || changes.ground === null) everyCell(doc, cells);
+      else {
         for (const r of changes.items) keepCellsOver(r, cells);
         // The ground moved: only the cells that hold elements are set on it again.
         const reached = new Set<number>();

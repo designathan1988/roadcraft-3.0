@@ -1881,6 +1881,12 @@ export function createSceneRenderer(
   let paintArea: Rect | null = null;
   /** The water's box over the plates shown, as the rivers' stones were last listed for. */
   let coverWater: WaterBox | null = null;
+  /** @rebuild Every cover dab's box (the only paints that raise a density): the paint read whole (a map opened, an undo the diary cannot place). */
+  const coverDabsArea = (doc: RoadDoc): Rect | null => {
+    let area: Rect | null = null;
+    for (const dab of doc.terrainPaint) if (isCoverKind(dab.kind)) area = unionRect(area, [dab.x - dab.radius, dab.y - dab.radius, dab.x + dab.radius, dab.y + dab.radius]);
+    return area;
+  };
   /** The covers' places brought up to the paint and the plates: only the cells a dab, a plate shown or let go, or a plate's water reached are listed again. */
   const coverFollow = (doc: RoadDoc): void => {
     const entries = coverPaintRead.read(doc.changes);
@@ -1890,9 +1896,7 @@ export function createSceneRenderer(
     const painted = new Set<number>(), shore = new Set<number>();
     const paintAll = entries === null || entries.some((e) => e.rects === null);
     if (paintAll) {
-      /** @rebuild Every cover dab's box (the only paints that raise a density): the paint read whole (a map opened, an undo the diary cannot place). */
-      paintArea = null;
-      for (const dab of doc.terrainPaint) if (isCoverKind(dab.kind)) paintArea = unionRect(paintArea, [dab.x - dab.radius, dab.y - dab.radius, dab.x + dab.radius, dab.y + dab.radius]);
+      paintArea = coverDabsArea(doc);
       for (const keep of paintedKeeps) for (const cell of keep.cellKeys()) painted.add(cell);
     } else {
       for (const entry of entries) for (const r of entry.rects!) {
@@ -1952,16 +1956,18 @@ export function createSceneRenderer(
     }
     for (const cell of shore) coverKeeps.shore.relist(cell, shoreIn(cell, coverGround, water));
   };
+  /** @rebuild Every planted tree's cell, and every cell kept: a map opened, or a change the diary cannot place. */
+  const plantedCellsAll = (doc: RoadDoc, keep: CellKeep<RoadDoc['trees'][number]>, cells: Set<number>): void => {
+    for (const cell of keep.cellKeys()) cells.add(cell);
+    for (const t of doc.trees) cells.add(keepCellAt(t.x, t.y));
+  };
   /** The planted trees brought up to the diary: the cells an entry reached listed again from the document (`RoadDoc.treesIn`). */
   const plantedFollow = (doc: RoadDoc, keep: CellKeep<RoadDoc['trees'][number]>): void => {
     const entries = plantedRead.read(doc.changes);
     if (entries !== null && entries.length === 0) return;
     const cells = new Set<number>();
-    if (entries === null || entries.some((e) => e.rects === null)) {
-      /** @rebuild Every tree: a map opened, or a change the diary cannot place. */
-      for (const cell of keep.cellKeys()) cells.add(cell);
-      for (const t of doc.trees) cells.add(keepCellAt(t.x, t.y));
-    } else {
+    if (entries === null || entries.some((e) => e.rects === null)) plantedCellsAll(doc, keep, cells);
+    else {
       for (const entry of entries) for (const r of entry.rects!) keepCellsOver(r, cells);
     }
     for (const cell of cells) keep.relist(cell, doc.treesIn(keepCellBox(cell)).filter((t) => keepCellAt(t.x, t.y) === cell));
