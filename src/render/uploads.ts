@@ -70,13 +70,20 @@ export function shadowStandIn(mesh: Mesh): Mesh | null {
 
 /** A copy of `object` to build its programs with: the same geometry, material and variant */
 export function compileCopy(object: Object3D): Object3D {
-  const instanced = object as InstancedMesh;
-  if (!instanced.isInstancedMesh) return object.clone(false);
-  const copy = new InstancedMesh(instanced.geometry, instanced.material, 1);
-  Object3D.prototype.copy.call(copy, instanced, false);
-  if (instanced.instanceColor) copy.instanceColor = new InstancedBufferAttribute(new Float32Array(3).fill(1), 3);
-  copy.morphTexture = instanced.morphTexture;
-  return copy;
+  // DO NOT copy userData: three clones it by JSON, and a road block keeps its far mesh there (GPU-only arrays: `toJSON` throws).
+  const userData = object.userData;
+  object.userData = {};
+  try {
+    const instanced = object as InstancedMesh;
+    if (!instanced.isInstancedMesh) return object.clone(false);
+    const copy = new InstancedMesh(instanced.geometry, instanced.material, 1);
+    Object3D.prototype.copy.call(copy, instanced, false);
+    if (instanced.instanceColor) copy.instanceColor = new InstancedBufferAttribute(new Float32Array(3).fill(1), 3);
+    copy.morphTexture = instanced.morphTexture;
+    return copy;
+  } finally {
+    object.userData = userData;
+  }
 }
 
 /** `shadow`: the object's material is a shadow's depth material, compiled for a shadow map. */

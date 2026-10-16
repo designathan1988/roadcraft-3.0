@@ -62,6 +62,21 @@ describe('meshes that live on the GPU', () => {
     expect(shadowStandIn(mesh)).not.toBeNull();
   });
 
+  it('a road block is copied to build its programs with its far level uploaded (kept in its userData)', () => {
+    const tiles = [tile(0), tile(2)];
+    const mesh = mergeTiles(tiles, { name: 'asphalt', material: new MeshBasicMaterial() }, { color: true, roadSection: true }, () => tiles)!;
+    const far = mergeTiles(tiles, { name: 'asphalt-far', material: mesh.material as MeshBasicMaterial }, { color: true, roadSection: true }, () => tiles)!;
+    upload(far);
+    mesh.userData['levels'] = { coarse: far };
+    mesh.castShadow = true;
+    expect(() => mesh.clone(false)).toThrow();
+    const copy = compileCopy(mesh) as Mesh;
+    expect(copy.geometry).toBe(mesh.geometry);
+    expect(copy.material).toBe(mesh.material);
+    expect(mesh.userData['levels']).toEqual({ coarse: far });
+    expect(shadowStandIn(mesh)).not.toBeNull();
+  });
+
   it('a road block lets its arrays go once uploaded, and takes them back the same', () => {
     const tiles = [tile(0), tile(2), tile(5)];
     const mesh = mergeTiles(tiles, { name: 'asphalt', material: new MeshBasicMaterial() }, { color: true, roadSection: true }, () => tiles)!;
