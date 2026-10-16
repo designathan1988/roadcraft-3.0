@@ -1588,9 +1588,9 @@ export class RoadDoc {
       this.changes.record('terrain', where(stamps?.rects), stamps?.ids ? { ids: stamps.ids } : {});
     }
     // The poles and wires where they differ, and only they: DO NOT read the landscaping into the poles' comparison again
-    if (items.utilities.length) this.changes.record('utilities', items.utilities);
-    if (items.landscape.length) this.changes.record('landscape', items.landscape);
-    if (changed.barriers || items.barriers.length) this.changes.record('barriers', where(items.barriers));
+    if (items.utilities.ids.length) this.changes.record('utilities', where(items.utilities.rects), { ids: items.utilities.ids });
+    if (items.landscape.ids.length) this.changes.record('landscape', where(items.landscape.rects), { ids: items.landscape.ids });
+    if (changed.barriers || items.barriers.ids.length) this.changes.record('barriers', where(items.barriers.rects), { ids: items.barriers.ids });
     // The buildings write their own (`BuildingStore.replaceWith`), each where it stands.
     for (const kind of changed.others) this.changes.record(kind, null);
   }
@@ -1646,15 +1646,19 @@ export class RoadDoc {
         }
       }
     };
+    // The items by id too, as their writers name them (`addPoleSpan`: the span and its two poles): a reader by id never reads everything.
+    const utilityIds = new Set<number>(), landscapeIds = new Set<number>(), barrierIds = new Set<number>();
     const itemRects = (): void => {
       for (const { part, id } of r.records) {
-        if (part === 'poles') { const p = this.poles.get(id as PoleId); if (p) utilities.push(rectAround([p], ITEM_PAD)!); }
+        if (part === 'poles') { utilityIds.add(id); const p = this.poles.get(id as PoleId); if (p) utilities.push(rectAround([p], ITEM_PAD)!); }
         if (part === 'poleSpans') {
+          utilityIds.add(id);
           const s = this.poleSpans.get(id as SpanId), p = s && this.poles.get(s.a), q = s && this.poles.get(s.b);
+          if (s) { utilityIds.add(s.a); utilityIds.add(s.b); }
           if (p && q) utilities.push(rectAround([p, q], ITEM_PAD)!);
         }
-        if (part === 'landscape') { const item = this.landscape.get(id); if (item) landscape.push(rectAround([item], ITEM_PAD)!); }
-        if (part === 'barriers') { const b = this.barriers.get(id); if (b) barriers.push(rectAround(b.points, ITEM_PAD)!); }
+        if (part === 'landscape') { landscapeIds.add(id); const item = this.landscape.get(id); if (item) landscape.push(rectAround([item], ITEM_PAD)!); }
+        if (part === 'barriers') { barrierIds.add(id); const b = this.barriers.get(id); if (b) barriers.push(rectAround(b.points, ITEM_PAD)!); }
       }
     };
     roadRects();
@@ -1710,9 +1714,9 @@ export class RoadDoc {
     const where = (rects: readonly ChangeRect[]): readonly ChangeRect[] | null => (rects.length ? rects : null);
     if (roadsTouched) this.roadsChanged(where(roads), traffic, { ids: roadIds, detail: 'restored' });
     // The paint style is written with the other values below, as its own kind (`setMarkingStyle`).
-    if (kinds.has('utilities')) this.changes.record('utilities', where(utilities));
-    if (kinds.has('landscape')) this.changes.record('landscape', where(landscape));
-    if (kinds.has('barriers')) this.changes.record('barriers', where(barriers));
+    if (kinds.has('utilities')) this.changes.record('utilities', where(utilities), { ids: [...utilityIds] });
+    if (kinds.has('landscape')) this.changes.record('landscape', where(landscape), { ids: [...landscapeIds] });
+    if (kinds.has('barriers')) this.changes.record('barriers', where(barriers), { ids: [...barrierIds] });
     for (const [kind, rects] of listRects) {
       if (kinds.has(kind)) continue;
       // A stretch put back as it was moves nothing (an empty list of rectangles writes no entry).
@@ -2602,37 +2606,42 @@ function stampDifferences(a: readonly TerrainStamp[], b: readonly TerrainStamp[]
   return { rects, ids };
 }
 
-/** Where two documents' poles and wires, landscaping and barriers differ. */
-function itemDifferences(a: RoadDoc, b: RoadDoc, moved: MovedKinds): { utilities: ChangeRect[]; landscape: ChangeRect[]; barriers: ChangeRect[] } {
-  const utilities: ChangeRect[] = [], landscape: ChangeRect[] = [], barriers: ChangeRect[] = [];
+/** Where two documents' poles and wires, landscaping and barriers differ, and their ids (a span with its two poles, as `addPoleSpan` names them). */
+function itemDifferences(a: RoadDoc, b: RoadDoc, moved: MovedKinds): Record<'utilities' | 'landscape' | 'barriers', { rects: ChangeRect[]; ids: number[] }> {
+  const utilities = { rects: [] as ChangeRect[], ids: [] as number[] };
+  const landscape = { rects: [] as ChangeRect[], ids: [] as number[] };
+  const barriers = { rects: [] as ChangeRect[], ids: [] as number[] };
   const at = (p: { x: number; y: number }): ChangeRect => rectAround([p], ITEM_PAD)!;
   if (moved('utilities')) {
-    for (const [id, p] of a.poles) { const q = b.poles.get(id); if (!q || p.x !== q.x || p.y !== q.y || p.lamp !== q.lamp) { utilities.push(at(p)); if (q) utilities.push(at(q)); } }
-    for (const [id, q] of b.poles) if (!a.poles.has(id)) utilities.push(at(q));
-    const spanRect = (doc: RoadDoc, s: UtilitySpan): ChangeRect | null => {
+    for (const [id, p] of a.poles) { const q = b.poles.get(id); if (!q || p.x !== q.x || p.y !== q.y || p.lamp !== q.lamp) { utilities.ids.push(id); utilities.rects.push(at(p)); if (q) utilities.rects.push(at(q)); } }
+    for (const [id, q] of b.poles) if (!a.poles.has(id)) { utilities.ids.push(id); utilities.rects.push(at(q)); }
+    const span = (doc: RoadDoc, s: UtilitySpan): void => {
+      utilities.ids.push(s.id, s.a, s.b);
       const p = doc.poles.get(s.a), q = doc.poles.get(s.b);
-      return p && q ? rectAround([p, q], ITEM_PAD) : null;
+      if (p && q) utilities.rects.push(rectAround([p, q], ITEM_PAD)!);
     };
-    for (const [id, s] of a.poleSpans) { const t = b.poleSpans.get(id); if (!t || t.a !== s.a || t.b !== s.b) { const r = spanRect(a, s); if (r) utilities.push(r); } }
-    for (const [id, t] of b.poleSpans) if (!a.poleSpans.has(id)) { const r = spanRect(b, t); if (r) utilities.push(r); }
+    for (const [id, s] of a.poleSpans) { const t = b.poleSpans.get(id); if (!t || t.a !== s.a || t.b !== s.b) { span(a, s); if (t) span(b, t); } }
+    for (const [id, t] of b.poleSpans) if (!a.poleSpans.has(id)) span(b, t);
   }
   if (moved('landscape')) {
     for (const [id, p] of a.landscape) {
       const q = b.landscape.get(id);
       if (q && p.kind === q.kind && p.x === q.x && p.y === q.y && p.signType === q.signType && p.text === q.text && p.planted === q.planted) continue;
-      landscape.push(at(p));
-      if (q) landscape.push(at(q));
+      landscape.ids.push(id);
+      landscape.rects.push(at(p));
+      if (q) landscape.rects.push(at(q));
     }
-    for (const [id, q] of b.landscape) if (!a.landscape.has(id)) landscape.push(at(q));
+    for (const [id, q] of b.landscape) if (!a.landscape.has(id)) { landscape.ids.push(id); landscape.rects.push(at(q)); }
   }
   if (moved('barriers')) {
     for (const [id, p] of a.barriers) {
       const q = b.barriers.get(id);
       if (q && JSON.stringify(p) === JSON.stringify(q)) continue;
-      barriers.push(rectAround(p.points, ITEM_PAD)!);
-      if (q) barriers.push(rectAround(q.points, ITEM_PAD)!);
+      barriers.ids.push(id);
+      barriers.rects.push(rectAround(p.points, ITEM_PAD)!);
+      if (q) barriers.rects.push(rectAround(q.points, ITEM_PAD)!);
     }
-    for (const [id, q] of b.barriers) if (!a.barriers.has(id)) barriers.push(rectAround(q.points, ITEM_PAD)!);
+    for (const [id, q] of b.barriers) if (!a.barriers.has(id)) { barriers.ids.push(id); barriers.rects.push(rectAround(q.points, ITEM_PAD)!); }
   }
   return { utilities, landscape, barriers };
 }

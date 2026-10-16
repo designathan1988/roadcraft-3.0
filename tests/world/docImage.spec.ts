@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { DocImage, PARTS_OF_SAVED } from '@world/docImage';
 import { samePlain } from '@core/plain';
 import { LIST_KINDS, RoadDoc } from '@world/doc';
+import { JournalCursor } from '@world/derived';
+import { History } from '@editor/history';
+import type { ChangeKind } from '@world/changes';
 
 describe('the image of the document', () => {
   it('names a part for every key of the saved map that the player changes', () => {
@@ -35,5 +38,35 @@ describe('the image of the document', () => {
     expect(patch.records.map((r) => `${r.part}:${r.id}`)).toContain(`nodes:${b.id}`);
     expect(patch.records.some((r) => r.part === 'nodes' && r.id === a.id)).toBe(false);
     expect(image.commit(doc)).toBe(null);
+  });
+
+  it('an undo and a document put back name the poles, wires, furniture and walls they change, by id', () => {
+    // Written without ids, a reader by id (the undo image, the solids) took every pole and bench of the map as changed
+    const doc = new RoadDoc();
+    const kinds: ChangeKind[] = ['utilities', 'landscape', 'barriers'];
+    const p = doc.addPole({ x: 0, y: 0 }), q = doc.addPole({ x: 40, y: 0 });
+    doc.addLandscape('bench', { x: 10, y: 10 });
+    const history = new History();
+    history.begin(doc);
+    const span = doc.addPoleSpan(p.id, q.id)!;
+    const bench = doc.addLandscape('bench', { x: 20, y: 10 });
+    const wall = doc.addBarrier('wall', [{ x: 0, y: 30 }, { x: 30, y: 30 }])!;
+    history.end(doc);
+    const reader = new JournalCursor(kinds, true);
+    reader.read(doc.changes);
+    const named = (): number[] => {
+      const entries = reader.read(doc.changes);
+      expect(entries).not.toBeNull();
+      return [...new Set(entries!.flatMap((e) => e.ids!))].sort((a, b) => a - b);
+    };
+    history.undo(doc);
+    expect(named()).toEqual([...new Set([p.id, q.id, span.id, bench.id, wall.id])].sort((a, b) => a - b));
+    history.redo(doc);
+    expect(named()).toEqual([...new Set([p.id, q.id, span.id, bench.id, wall.id])].sort((a, b) => a - b));
+    // A whole document put in its place: the items that differ, by id.
+    const other = RoadDoc.fromJSON(doc.toJSON());
+    other.removeLandscape(bench.id);
+    doc.replaceFromJSON(other.toJSON());
+    expect(named()).toEqual([bench.id]);
   });
 });
