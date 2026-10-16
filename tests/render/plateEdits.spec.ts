@@ -124,6 +124,23 @@ describe('a plate edited by the brush', () => {
     }
   });
 
+  it('reads the biomes painted, and once the paint is cleared reads the land as a plate never painted', () => {
+    const doc = new RoadDoc();
+    const source = (terrainPaint: PaintDab[], paintRevision: number): TerrainSource => ({
+      changes: doc.changes, terrainRevision: 1, terrainStamps: [], terrainRelief: RELIEF_NATURAL, natureRevision: 1, nature: { region: 'cerrado', seed: 7 }, paintRevision, terrainPaint,
+    });
+    const plain = createTerrainSurface(1, { x: 0, y: 0 }, 12);
+    plain.update(source([], 1), false);
+    plain.updatePaint(source([], 1));
+    const painted = createTerrainSurface(1, { x: 0, y: 0 }, 12);
+    painted.update(source([], 1), false);
+    painted.updatePaint(source([{ id: 1, kind: 'amazon', x: 0, y: 0, radius: 300, strength: 1 } as PaintDab], 1));
+    expect(firstDiff(painted.ecology()!.region, plain.ecology()!.region)).not.toBe(-1);
+    painted.updatePaint(source([], 2));
+    const a = painted.ecology()!, b = plain.ecology()!;
+    for (const key of ['canopy', 'trees', 'grass', 'dry', 'wet', 'region'] as const) expect(firstDiff(a[key], b[key])).toBe(-1);
+  });
+
   it('keeps the plate made off the page when stamps are on it, and lays them on it', () => {
     const side = Math.round((2 * TERRAIN_HALF) / TERRAIN_CELL) + 1;
     const ground = new Float64Array(side * side);
