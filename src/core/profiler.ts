@@ -72,7 +72,8 @@ export interface ChangeSeen {
 }
 
 export class Profiler {
-  enabled = true;
+  /** Counting at all: only while its HUD is shown (`profilerHud.ts`). */
+  enabled = false;
   private readonly tallies = new Map<ProfiledEvent, Tally>();
   private frameCalls = 0;
   private windowStart = 0;
