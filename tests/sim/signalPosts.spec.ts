@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { RoadDoc } from '@world/doc';
 import type { NodeId } from '@world/ids';
-import { signalPosts } from '@world/signalPosts';
+import { signalGroupsOf, signalPosts } from '@world/signalPosts';
 import { m } from '@world/units';
 import { Rng } from '@core/rng';
 import type { SimWorld } from '@sim/world';
@@ -52,7 +52,7 @@ describe('the signal posts the walkers keep clear of', () => {
     const sim = simOf(doc, 0x5eed, 1);
     const apply = (): boolean => (sim as unknown as { applyAutoControl(): boolean }).applyAutoControl();
     sim.signalPosts.follow(sim);
-    expect(indexed(sim, junctions)).toEqual(signalPosts(sim.net, sim.graph).map(key).sort());
+    expect(indexed(sim, junctions)).toEqual(signalPosts(sim.net, signalGroupsOf(sim.graph)).map(key).sort());
     const rng = new Rng(7);
     let switched = 0;
     for (let round = 0; round < 12; round++) {
@@ -71,7 +71,7 @@ describe('the signal posts the walkers keep clear of', () => {
       expect([...new Set(nodes)].sort((a, b) => a - b)).toEqual([...turned].sort((a, b) => a - b));
       switched += turned.size;
       sim.signalPosts.follow(sim);
-      expect(indexed(sim, junctions)).toEqual(signalPosts(sim.net, sim.graph).map(key).sort());
+      expect(indexed(sim, junctions)).toEqual(signalPosts(sim.net, signalGroupsOf(sim.graph)).map(key).sort());
     }
     expect(switched).toBeGreaterThan(20);
     // An edit of the roads: the junctions it reached
@@ -81,6 +81,6 @@ describe('the signal posts the walkers keep clear of', () => {
     sim.rebuildTopology();
     expect(sim.signalChangesSince(before).nodes).not.toBeNull();
     sim.signalPosts.follow(sim);
-    expect(indexed(sim, junctions)).toEqual(signalPosts(sim.net, sim.graph).map(key).sort());
+    expect(indexed(sim, junctions)).toEqual(signalPosts(sim.net, signalGroupsOf(sim.graph)).map(key).sort());
   });
 });

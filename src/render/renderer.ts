@@ -6,7 +6,7 @@ import type { Vehicle } from '@sim/vehicles/state';
 import { workUntil } from '@core/frameWork';
 import { pointInPolygon } from '@core/polygon';
 import type { Occupant, RagdollProbe } from './ragdoll';
-import type { PlayEffects } from './playEffects';
+import type { GetUp, PlayEffects } from './playEffects';
 import { createLotOverlay, type LotOverlayInput } from './lotOverlay';
 import { onCarriageway } from '@world/carriageway';
 import {
@@ -48,6 +48,7 @@ import { footwayRiseAt, packFlush } from '@world/roads/footwayRise';
 import { type PavingData, type PavingSource, pavedHeightFrom } from '@world/paving';
 import type { RoadStructure } from '@world/structures';
 import type { SimWorld } from '@sim/world';
+import type { SimMirror } from '@sim/mirror';
 import type { Viewport } from '@view/viewport';
 
 import { createAgentMeshes, type AgentMeshes } from './agents';
@@ -178,7 +179,14 @@ interface RenderStats {
 interface DrawOptions {
   /** Keep the roads, and everything laid along them, as they are */
   readonly holdRoads?: boolean;
+  /** The simulation's clock stands still. */
+  readonly paused?: boolean;
+  /** Somebody a ragdoll held up again (`PlayEffects.frame`). */
+  readonly getUp?: GetUp;
 }
+
+/** Where the player is looking, as the simulation takes it (`SimWorld.focus`). */
+type SimFocus = NonNullable<SimWorld['focus']>;
 
 export interface SceneHandle {
   /** Loads what shots and blows leave behind */
@@ -280,7 +288,7 @@ export interface SceneHandle {
   /** A shot striking a vehicle at world (x, y, height z), coming along (dirX, dirY) */
   vehicleHit(x: number, y: number, z: number, dirX: number, dirY: number, glass: boolean, blood: boolean): void;
   /** The body a vehicle's driver or rider is drawn with (`AgentMeshes.driverBody`). */
-  driverBody(vehicle: Vehicle, x: number, y: number): number | null;
+  driverBody(vehicle: Pick<Vehicle, 'id' | 'people' | 'peopleAge' | 'archetype'>, x: number, y: number): number | null;
   /** A two-wheeler its rider was shot off: the machine itself falling over and sliding to a stop. */
   dropVehicle(v: { id: number; archetype: Archetype; x: number; y: number; angle: number; color: number; dirX: number; dirY: number }): void;
   /** The height the terrain is drawn at — what anything laid on it must clear. */
@@ -304,7 +312,9 @@ export interface SceneHandle {
   /** The height of the paving at a point - footway or carriageway of a road at grade - or NaN off the roads. */
   pavedHeightAt(x: number, y: number): number;
   resize(): void;
-  draw(net: Network, sim: SimWorld, alpha: number, delta: number, options?: DrawOptions): void;
+  draw(net: Network, sim: SimMirror, alpha: number, delta: number, options?: DrawOptions): void;
+  /** Where the last frame drawn looked (`draw`): the simulation's people and traffic live round it. */
+  readonly focus: SimFocus | null;
   setQuality(level: QualityLevel | 'auto'): void;
   readonly quality: QualityLevel | 'auto';
   /** The inspection camera (`inspector.ts`); null outside development builds. */
@@ -678,6 +688,8 @@ export function createSceneRenderer(
     if (step.done) { worldJob = null; stepCosts.fill(0); shadowMoved = true; }
     else onAssetsReady();
   };
+  /** Where the last frame drawn looked (`SceneHandle.focus`). */
+  let focusNow: SimFocus | null = null;
   let networkRevision = -1;
   let terrainRevision = -1;
   let builtTriangles = 0;
@@ -686,7 +698,6 @@ export function createSceneRenderer(
   let terrainMs = 0;
 
   const deckHeight = (
-    _world: SimWorld,
     x: number,
     y: number,
     segment: SegmentId | undefined,
@@ -2073,6 +2084,7 @@ export function createSceneRenderer(
     animProbe: (id) => agents.animProbe(id),
     forceClip: (id, clip) => agents.forceClip(id, clip as never),
     driverBody: (vehicle, x, y) => agents.driverBody(vehicle, x, y),
+    get focus() { return focusNow; },
     vehicleHit(x, y, z, dirX, dirY, glass, blood) { fx?.vehicleHit(x, y, z, dirX, dirY, glass, blood); },
     dropVehicle(v) { fx?.dropVehicle(v); },
     wound(x, y, z, dirX, dirY, severed) { fx?.wound(x, y, z, dirX, dirY, severed); },
@@ -2244,7 +2256,7 @@ export function createSceneRenderer(
       renderer.info.reset();
       groundDiary = net.doc.changes;
       // Planted trees and shrubs grow with the city's clock: resized once a city hour.
-      cityMinutes = sim.city.minutes(sim);
+      cityMinutes = sim.minutes;
       const wallNow = performance.now();
       const wallDt = lastWall < 0 ? 0 : Math.min(0.1, (wallNow - lastWall) / 1000);
       // The bodies, guts and debris on their own clock
@@ -2609,8 +2621,8 @@ export function createSceneRenderer(
       transit.cull(crowdFrustum, crowdProjection);
       for (const plants of [coverCells, natureCards, natureForest, paintedForest, plantedForest]) plants?.cull(crowdFrustum, crowdProjection);
       gardens?.cull(crowdFrustum, crowdProjection);
-      transit.update(sim.city.transit.trains(), terrain.renderedHeightAt);
-      agents.sync(sim, alpha, detailed, rig.viewport.zoom, {
+      transit.update(sim.trains, terrain.renderedHeightAt);
+      agents.sync(sim, net, alpha, detailed, rig.viewport.zoom, {
         pedestrianDetail: quality.pedestrianDetail,
         pedestrianVisible,
         personPixels,
@@ -2624,7 +2636,7 @@ export function createSceneRenderer(
           if (!dusty && Math.abs(speed) > 0.5) wear.wheels(x, y, angle, Math.min(length * 0.42, m(1.7)), wallDt);
         },
         // The bodies of shots and blows (`playEffects.ts`), once anybody has shot or struck.
-        ...(fx ? { ragdolls: (citizens: Parameters<PlayEffects['frame']>[0]) => fx!.frame(citizens, sim, wallDt, fxDt) } : {}),
+        ...(fx ? { ragdolls: (citizens: Parameters<PlayEffects['frame']>[0]) => fx!.frame(citizens, sim, net.doc, options?.getUp ?? (() => {}), wallDt, fxDt) } : {}),
         hiddenPed: (id) => fx?.hides(id) ?? false,
       });
       exhaust.tick(windClock, renderer.domElement.height / 2);
@@ -2632,10 +2644,10 @@ export function createSceneRenderer(
       for (const ped of sim.pedViews) if (ped.v > 0.05) wear.feet(ped.x, ped.y, wallDt);
       wear.tick(wallDt);
       // The rooms cut open are lit from inside: brighter as the day goes.
-      const key = cutSpec ? `${cutSpec.level}@${cutSpec.x},${cutSpec.y}:${sim.doc.buildings.revision}` : '';
+      const key = cutSpec ? `${cutSpec.level}@${cutSpec.x},${cutSpec.y}:${net.doc.buildings.revision}` : '';
       if (key !== lampsKey) {
         lampsKey = key;
-        const lamps = roomLamps.lamps(sim, cutSpec, builtGroundAt, pavedHeightAt, ROOM_LIGHTS);
+        const lamps = roomLamps.lamps(net.doc, cutSpec, builtGroundAt, pavedHeightAt, ROOM_LIGHTS);
         roomLights.forEach((light, i) => {
           const at = lamps[i];
           light.userData['used'] = !!at;
@@ -2644,7 +2656,7 @@ export function createSceneRenderer(
       }
       // Falls off with the distance in world units: the same lamp in metres at any unit.
       for (const light of roomLights) light.intensity = cutSpec && light.userData['used'] ? 55 * TUNED_UNIT ** light.decay * (0.25 + 0.75 * lastDark) : 0;
-      signals.sync(sim, detailed, crowdFrustum);
+      signals.sync(sim, net, detailed, crowdFrustum);
 
       target.copy(rig.target);
       const halfHeight = canvas.clientHeight / Math.max(0.001, rig.viewport.zoom * 2);
@@ -2660,7 +2672,7 @@ export function createSceneRenderer(
       }
       // Day and night, by the city's clock (`sim/city/city.ts`).
       const fixedHour = skyMode === 'day' ? 16 * 60 : skyMode === 'night' ? 22 * 60 : null;
-      const clock = fixedHour === null ? sim.city.minutes(sim) : fixedHour;
+      const clock = fixedHour === null ? sim.minutes : fixedHour;
       {
         // THE WEATHER (`world/weather.ts`): the wind carries the clouds and bends the plants and the smoke
         const weather = net.doc.weather;
@@ -2728,7 +2740,7 @@ export function createSceneRenderer(
             };
           }
         }
-        sim.focus = {
+        focusNow = {
           x: target.x,
           y: -target.z,
           r: Math.hypot(halfWidth, groundHalfDepth) + m(20),
@@ -2743,7 +2755,7 @@ export function createSceneRenderer(
         // The two-wheelers changed between casting and a soft disc: their shadows come or go now.
         if (agents.castersChanged) shadowMoved = true;
         // Moving only when something that moves is in the pass (`movingCasters`) or the wind bends the trees
-        const moving = net.doc.weather.wind > 0 || (!sim.clock.paused && movingCasters());
+        const moving = net.doc.weather.wind > 0 || (!options?.paused && movingCasters());
         const every = rig.viewport.zoom >= SHADOW_FULL_ZOOM ? 1 : SHADOW_FAR_EVERY;
         if (shadowMoved || sunMoved || (moving && shadowFrame >= every) || shadowFrame >= SHADOW_SAFETY_FRAMES) {
           renderer.shadowMap.needsUpdate = true;

@@ -127,17 +127,12 @@
       "count": 3
     }
   },
-  "src/frameLoop.ts": {
-    "roadcraft/no-global-revision": {
-      "count": 3
-    }
-  },
   "src/main.ts": {
     "max-lines": {
       "count": 1
     },
     "roadcraft/no-global-revision": {
-      "count": 15
+      "count": 11
     },
     "roadcraft/no-logic-timer": {
       "count": 3
@@ -555,6 +550,11 @@
       "count": 2
     }
   },
+  "src/sim/host.ts": {
+    "roadcraft/no-global-revision": {
+      "count": 3
+    }
+  },
   "src/sim/intersections/admission.ts": {
     "max-lines": {
       "count": 1
@@ -586,6 +586,11 @@
   "src/sim/routing/router.ts": {
     "roadcraft/no-module-state": {
       "count": 1
+    }
+  },
+  "src/sim/topologyCatchUp.ts": {
+    "roadcraft/no-global-revision": {
+      "count": 3
     }
   },
   "src/sim/transit/transit.ts": {
@@ -662,7 +667,7 @@
   },
   "src/ui/inspector.ts": {
     "roadcraft/no-global-revision": {
-      "count": 2
+      "count": 1
     },
     "roadcraft/no-module-state": {
       "count": 4
@@ -694,9 +699,6 @@
     }
   },
   "src/ui/roads/connectorPanel.ts": {
-    "roadcraft/no-global-revision": {
-      "count": 1
-    },
     "roadcraft/no-module-state": {
       "count": 2
     }

@@ -88,7 +88,7 @@ const PERSON_BASE = 1 << 24;
 const SEAT_STRIDE = Math.max(8, ...ARCHETYPES.map((a) => a.seats));
 
 /** Who sits in a seat. */
-export function seatPerson(v: Vehicle, seat: number): { seed: number; gender: PersonGender; ageClass: PersonAgeClass } {
+export function seatPerson(v: Pick<Vehicle, 'id' | 'people' | 'peopleAge' | 'archetype'>, seat: number): { seed: number; gender: PersonGender; ageClass: PersonAgeClass } {
   const picked = v.people[seat];
   const seed = picked ?? PERSON_BASE + v.id * SEAT_STRIDE + seat;
   const hash = personHash(seed);

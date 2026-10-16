@@ -46,7 +46,23 @@ export function signalPostPlace(net: Network, node: NodeId, segmentId: SegmentId
 }
 
 /** DO NOT ask for every post of the map to keep those round one point (a blast, `actionsWiring.ts`). */
-export function signalPosts(net: Network, graph: LaneletGraph, near?: { readonly x: number; readonly y: number; readonly radius: number }): SignalPost[] {
+/** The signalised junctions as the posts are placed from them: the lane graph's (`signalGroupsOf`), or the page's (`SimMirror`). */
+export interface SignalGroups {
+  /** Every junction that may have a signal. */
+  nodes(): Iterable<NodeId>;
+  /** A junction's signal groups, undefined when it has no signal. */
+  groupsOf(node: NodeId): readonly { readonly segments: readonly SegmentId[] }[] | undefined;
+}
+
+/** The lane graph's signalised junctions (`SignalGroups`). */
+export function signalGroupsOf(graph: LaneletGraph): SignalGroups {
+  return {
+    nodes: () => graph.junctions.keys(),
+    groupsOf: (node) => { const junction = graph.junctions.get(node); return junction?.signalised ? junction.groups : undefined; },
+  };
+}
+
+export function signalPosts(net: Network, signals: SignalGroups, near?: { readonly x: number; readonly y: number; readonly radius: number }): SignalPost[] {
   const out: SignalPost[] = [];
   let nodes: NodeId[];
   if (near) {
@@ -55,15 +71,15 @@ export function signalPosts(net: Network, graph: LaneletGraph, near?: { readonly
       const s = net.doc.segment(ribbon.id);
       if (s) { ends.add(s.a); ends.add(s.b); }
     }
-    nodes = [...ends].filter((node) => graph.junctions.has(node)).sort((a, b) => a - b);
-  } else nodes = [...graph.junctions.keys()].sort((a, b) => a - b);
+    nodes = [...ends].filter((node) => signals.groupsOf(node) !== undefined).sort((a, b) => a - b);
+  } else nodes = [...signals.nodes()].sort((a, b) => a - b);
   for (const node of nodes) {
-    const junction = graph.junctions.get(node);
-    if (!junction?.signalised) continue;
+    const groups = signals.groupsOf(node);
+    if (!groups) continue;
     const record = net.doc.node(node);
     if (!record) continue;
     for (const segmentId of record.incident) {
-      if (!junction.groups.some((group) => group.segments.includes(segmentId))) continue;
+      if (!groups.some((group) => group.segments.includes(segmentId))) continue;
       const post = signalPostPlace(net, node, segmentId);
       if (post) out.push(post);
     }

@@ -65,11 +65,31 @@ export function recordCasualty(w: SimWorld, c: Casualty): void {
   list.push(c);
 }
 
-/** The casualties of blows on the map; their clocks advanced by `dt`, a minute's worth kept. */
-export function impactCasualties(w: SimWorld, dt = 0): readonly Casualty[] {
+/** The casualties recorded since the last call (`recordCasualty`), taken: the page keeps them (`CasualtyBook`). */
+export function takeCasualties(w: SimWorld): Casualty[] {
   const list = RECORDS.get(w);
-  if (!list) return [];
-  for (const c of list) c.t += dt;
-  if (list.length && list[0]!.t > 60) RECORDS.set(w, list.filter((c) => c.t <= 60));
-  return RECORDS.get(w)!;
+  if (!list?.length) return [];
+  const out = list.slice();
+  list.length = 0;
+  return out;
+}
+
+/** The casualties of blows on the map as the page draws them: each one's clock run on, a minute's worth kept. */
+export class CasualtyBook {
+  private list: Casualty[] = [];
+
+  add(taken: readonly Casualty[]): void {
+    for (const c of taken) this.list.push(c);
+  }
+
+  /** The book, each clock advanced by `dt`. */
+  advance(dt = 0): readonly Casualty[] {
+    for (const c of this.list) c.t += dt;
+    if (this.list.length && this.list[0]!.t > 60) this.list = this.list.filter((c) => c.t <= 60);
+    return this.list;
+  }
+
+  clear(): void {
+    this.list = [];
+  }
 }

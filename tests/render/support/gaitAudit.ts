@@ -4,7 +4,7 @@ import { pedPose } from '@sim/pose';
 import { personHash, type PedView } from '@sim/people/view';
 import type { SimWorld } from '@sim/world';
 import { m } from '@world/units';
-import { SIGNAL_POST_RADIUS, signalPosts } from '@world/signalPosts';
+import { SIGNAL_POST_RADIUS, signalGroupsOf, signalPosts } from '@world/signalPosts';
 import { streetFurniture } from '@world/streetFurniture';
 import { WALK_STYLES, type GaitClipName, type GaitClips, type GaitPlay } from '@render/citizenGait';
 import { fixtureDoc, simOf } from '../../sim/support/bodies';
@@ -203,7 +203,7 @@ export function auditFlow(seconds: number, seed = 3, breakdown?: Map<string, num
   const items: Obstacle[] = streetFurniture(sim.net).filter((item) => item.on === 'footway');
   for (const pole of sim.doc.poles.values()) items.push({ x: pole.x, y: pole.y, radius: m(0.18), kind: 'utilityPole' });
   // Signal posts are furniture too, and the one people meet most: at the kerb.
-  for (const post of signalPosts(sim.net, sim.graph)) items.push({ x: post.x, y: post.y, radius: SIGNAL_POST_RADIUS, kind: 'signalPost' });
+  for (const post of signalPosts(sim.net, signalGroupsOf(sim.graph))) items.push({ x: post.x, y: post.y, radius: SIGNAL_POST_RADIUS, kind: 'signalPost' });
   const CELL = m(4);
   const grid = new Map<string, typeof items>();
   for (const item of items) {

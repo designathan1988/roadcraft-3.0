@@ -8,7 +8,7 @@ import { flipProfile, streetChain } from '@world/roads/streetChain';
 import { furnitureChosen } from '@ui/roads/furnitureChoice';
 import { isMarkingStyle } from '@world/roads/markingStyle';
 import { createActions } from './actionsWiring';
-import { FrameClock, Periodic, SimPeriodic, TopologyCatchUp, coalescedTask } from './frameLoop';
+import { FrameClock, Periodic, SimPeriodic, coalescedTask } from './frameLoop';
 import { ConflictPool } from './conflictPool';
 import { BayPool } from './bayPool';
 import { useBayWorkers } from '@sim/agents/parking';
@@ -16,8 +16,6 @@ import { beginFrameWork } from '@core/frameWork';
 import { GameState } from '@core/gameState';
 import { Engine } from '@core/engine';
 import { InputQueue } from '@core/events';
-import { rebuildWork } from '@world/rebuildWork';
-import { laneGrid } from '@sim/agents/laneGrid';
 import { FrameTimer, HealthLog, frameStats } from '@core/health';
 import { LotTool, type LotSplitKind, type ZoneMode } from '@editor/lotTool';
 import { watchHealth } from '@ui/healthWatch';
@@ -32,6 +30,7 @@ import { DOC_CHANGE_KINDS, type Change, type ChangeKind, type ChangeRect } from 
 import { MIN_LINK_LENGTH } from '@world/approach';
 import { MAX_AUTHORED_GRADE } from '@world/elevation';
 import { Network } from '@world/network';
+import { PageSimHost, type SimHost, type SimSettings } from '@sim/host';
 import { DEFAULT_CITY, planCity, type CityOptions, type CityPlan } from '@world/cityGen/plan';
 import { greenCitySteps, layCity, widenCityFootways, zoneCity } from '@editor/cityGenerator';
 import { LAST_UPGRADE_CLASS, ROAD_TYPES, roadProfile, roadType } from '@world/roadTypes';
@@ -77,9 +76,8 @@ declare const __CONFLICT_ZONES_HASH__: string | undefined;
 import { DEFAULT_AZIMUTH, DEFAULT_ELEVATION, isoZoomBounds } from '@render/isoViewport';
 
 import { SimWorld } from '@sim/world';
-import { rebindAgents, step } from '@sim/pipeline';
-import { DT, NARROW_SCREEN_SHARE, NARROW_SCREEN_WIDTH, SIM_FRAME_BUDGET_MS } from '@sim/params';
-import { PopulationGovernor } from '@sim/populationGovernor';
+import { WorkerSimHost } from './simWorkerHost';
+import { DT, NARROW_SCREEN_SHARE, NARROW_SCREEN_WIDTH } from '@sim/params';
 
 import { type Anchor, anchorForHeight, findAnchor, roadSnap, setRoadSnap } from '@editor/snap';
 import { duplicateSegment, joinSegments, splitSegment } from '@editor/commit';
@@ -181,6 +179,8 @@ surface.observe();
 
 // ------------------------------------------------------------------ boot
 const surfaceBake = startSurfaceBake();
+/** The simulation's seed: the same town plays out the same way. */
+const SIM_SEED = 0x2024;
 /** The conflict zones measured in earlier sessions */
 const ZONES_PREFIX = typeof __CONFLICT_ZONES_HASH__ !== 'undefined' && __CONFLICT_ZONES_HASH__ ? `zones:${__CONFLICT_ZONES_HASH__}:` : null;
 if (ZONES_PREFIX) forgetOtherDerived('zones', ZONES_PREFIX.slice('zones:'.length, -1));
@@ -230,20 +230,35 @@ if (saved) {
   }
 }
 
-const sim = new SimWorld(doc, net, 0x2024);
-// The lots' bays worked out on the other cores (`bayPool.ts`)
-useBayWorkers(sim, new BayPool());
-sim.auditEnabled = true;
-sim.auditLevel = 'cheap';
-// The status bar's alerts: checked once a second of play, not on every one of its sixty ticks
-sim.auditEvery = 60;
-/** The population the machine sustains (`sim/populationGovernor.ts`), never more than the device's own share. */
-const populationGovernor = new PopulationGovernor(1);
-function syncPopulationShare(): void {
-  populationGovernor.setMax(window.innerWidth < NARROW_SCREEN_WIDTH ? NARROW_SCREEN_SHARE : 1);
-  sim.populationShare = populationGovernor.share;
+const engineFlags = new URLSearchParams(location.search);
+/** The simulation as the page holds it (`sim/host.ts`): what it draws of it (`shown`), asks of it and does to it. */
+const simHost: SimHost = await startSimulation({
+  paused: savedSession?.settings.paused === true,
+  speed: savedSession?.settings.speed ?? 1,
+  trafficIntensity: savedSession?.settings.trafficIntensity ?? 1,
+  pedestrianIntensity: savedSession?.settings.pedestrianIntensity ?? 1,
+  demandMultiplier: savedSession?.settings.demandMultiplier ?? 1,
+}, engineFlags.get('ambient') === 'view' ? 'view' : 'edges');
+const shown = simHost.shown;
+
+/** The simulation in its worker (`simWorkerHost.ts`); on the page only when asked (`?sim=page`, probes that read the world). */
+async function startSimulation(settings: SimSettings, ambientSource: 'view' | 'edges'): Promise<SimHost> {
+  if (engineFlags.get('sim') !== 'page') return new WorkerSimHost(doc, { seed: SIM_SEED, settings, ambientSource, zonesPrefix: ZONES_PREFIX }, () => requestDraw());
+  const sim = new SimWorld(doc, net, SIM_SEED);
+  // The lots' bays worked out on the other cores (`bayPool.ts`)
+  useBayWorkers(sim, new BayPool());
+  sim.auditEnabled = true;
+  sim.auditLevel = 'cheap';
+  // The status bar's alerts: checked once a second of play, not on every one of its sixty ticks
+  sim.auditEvery = 60;
+  sim.usePedestrianEngine((await import('@sim/agents/walk')).createAgentWalkEngine());
+  // The scenery's life (`sim/ambient`): nobody lives here
+  sim.ambient.enabled = true;
+  sim.ambient.source = ambientSource;
+  return new PageSimHost(net, sim, new ConflictPool(ZONES_PREFIX), settings);
 }
-syncPopulationShare();
+/** The share of the population the screen allows (`sim/populationGovernor.ts`): a narrow one carries fewer. */
+const screenShare = (): number => (window.innerWidth < NARROW_SCREEN_WIDTH ? NARROW_SCREEN_SHARE : 1);
 
 /** The zoom range the renderer we are about to boot can actually represent. */
 function bootZoomBounds(): { min: number; max: number } {
@@ -315,18 +330,11 @@ const LANDFORMS: Readonly<Record<Landform, { readonly mode: 'raise' | 'lower'; r
 };
 const landformOf = (mode: BrushMode): (typeof LANDFORMS)[Landform] | undefined => (LANDFORMS as Partial<Record<BrushMode, (typeof LANDFORMS)[Landform]>>)[mode];
 const hardnessByMode: Partial<Record<BrushMode, number>> = { raise: 0, lower: 0, mesa: 85, canyon: 80, escarpment: 75 };
-sim.clock.paused = savedSession?.settings.paused === true;
-sim.clock.speed = savedSession?.settings.speed ?? 1;
-sim.trafficIntensity = savedSession?.settings.trafficIntensity ?? 1;
-sim.pedestrianIntensity = savedSession?.settings.pedestrianIntensity ?? 1;
-// How many cars and people the panel asks for: they come in at the ends of the roads (`sim/ambient` source 'edges').
-sim.followCity = true;
-sim.demandMultiplier = savedSession?.settings.demandMultiplier ?? 1;
 /** The game's state - the tool in hand, the pause and speed, the quality, the selection */
 const gameState = new GameState({
   tool: 'inspect' as Tool,
-  paused: sim.clock.paused,
-  speed: sim.clock.speed,
+  paused: simHost.settings.paused,
+  speed: simHost.settings.speed,
   quality: 'high' as string,
   selectedSegment: null as SegmentId | null,
   selectedSegmentS: null as number | null,
@@ -377,11 +385,7 @@ function sessionSettings(): SavedSettings {
   const centre = view.centre;
   return {
     camera: { x: centre.x, y: centre.y, zoom: view.zoom, azimuth: view.azimuth, elevation: view.elevation },
-    paused: sim.clock.paused,
-    speed: sim.clock.speed,
-    trafficIntensity: sim.trafficIntensity,
-    pedestrianIntensity: sim.pedestrianIntensity,
-    demandMultiplier: sim.demandMultiplier,
+    ...simHost.settings,
     congestionOverlay: game.congestionOverlay,
   };
 }
@@ -436,7 +440,7 @@ const streetscapeTool = new StreetscapeTool({
   kind: () => streetscapeKind(),
   extra: (kind) => kind === 'sign' ? { signType: signChoice.type, text: signChoice.text }
     : kind === 'streetname' ? { text: signChoice.streetName }
-    : kind === 'tree' || kind === 'shrub' ? { planted: sim.city.minutes(sim) } : {},
+    : kind === 'tree' || kind === 'shrub' ? { planted: simHost.minutes } : {},
   mutate: (fn) => mutate(fn),
   hint: (key) => flashHint(key),
   redraw: () => requestDraw(),
@@ -498,7 +502,7 @@ const mover = new NodeMover({
   doc,
   net,
   settleTopology: () => {
-    if (sim.topologyRevision !== net.trafficRevision) rebuildSimulationTopology();
+    simHost.settle();
   },
   mutate: (fn) => mutate(fn),
   hint: (key) => flashHint(key),
@@ -581,29 +585,9 @@ function savedQualityLevel(): QualityLevel {
 
 // The graphics are what the player chose (High until they choose): the game never lowers them on its own.
 primeSurfaceBake(await surfaceBake);
-sim.conflicts.seed(await keptZones);
+simHost.seedZones(await keptZones);
 /** The engine that brings every derived product up to date, its ledger the work each did (`core/engine.ts`). */
 const engine = new Engine();
-/** The simulation's products derived from the roads, in the engine */
-function registerSimProducts(): void {
-  engine.register({
-    name: 'walkways',
-    refresh: (): number => {
-      const before = rebuildWork.walkways;
-      sim.walkwaysNow();
-      return rebuildWork.walkways - before;
-    },
-  }, 'frame');
-  engine.register({
-    name: 'lanes by place',
-    refresh: (): number => {
-      const before = sim.laneGrid.work;
-      laneGrid(sim);
-      return sim.laneGrid.work - before;
-    },
-  }, 'frame');
-}
-registerSimProducts();
 const scene: SceneHandle = createSceneRenderer(canvas3d, { x: camera.x, y: camera.y }, camera.zoom, savedQualityLevel(), requestDraw, engine);
 // The surgical profiler (`core/profiler.ts`)
 const profileFrameEnd = wireProfiler();
@@ -638,11 +622,6 @@ function wireProfiler(): () => void {
 }
 
 // The traffic's topology is not built here: it is built a slice a frame while the opening puts the town together
-const engineFlags = new URLSearchParams(location.search);
-sim.usePedestrianEngine((await import('@sim/agents/walk')).createAgentWalkEngine());
-// The scenery's life (`sim/ambient`): nobody lives here
-sim.ambient.enabled = true;
-sim.ambient.source = engineFlags.get('ambient') === 'view' ? 'view' : 'edges';
 view = scene.viewport;
 restoreOrbit(savedSession?.settings.camera);
 canvas.style.opacity = '0';
@@ -655,7 +634,7 @@ overlayCanvas.style.cssText =
 canvas.parentElement?.appendChild(overlayCanvas);
 overlayCtx = overlayCanvas.getContext('2d');
 
-window.addEventListener('resize', () => { scene.resize(); syncPopulationShare(); }, { passive: true });
+window.addEventListener('resize', () => { scene.resize(); }, { passive: true });
 canvas.dataset['render'] = 'webgl';
 
 // Modular buildings
@@ -796,7 +775,7 @@ function mutateBuilt(fn: () => boolean): boolean {
   if (!changed || !recorded) return false;
   performance.measure('hitch:mutate/edit+after', { start: mutateAt, end: performance.now() });
   // The simulation catches up in the frame AFTER the one that draws the edit
-  topologyAfterDraw = topologyAfterDraw || sim.topologyRevision !== net.trafficRevision;
+  topologyAfterDraw = topologyAfterDraw || simHost.behind(net.trafficRevision);
   persistence.saveSessionSoon(doc, sessionSettings);
   updateHistoryButtons();
   updateStatus();
@@ -813,8 +792,7 @@ function applySnapshot(data: ReturnType<RoadDoc['toJSON']> | null, source: 'snap
   if (source === 'import') {
     caused('map opened', () => restoreInto(doc, data, net));
     // A different map: nothing of the old simulation may carry over.
-    sim.reset();
-    sim.ambient.reset(sim);
+    simHost.reset();
   } else {
     restoreSnapshot(doc, data, net);
   }
@@ -827,12 +805,6 @@ function applySnapshot(data: ReturnType<RoadDoc['toJSON']> | null, source: 'snap
   updateHistoryButtons();
   updateStatus();
   requestDraw();
-}
-
-/** Keeps live agents bound when the UI rebuilds topology outside a sim tick. */
-function rebuildSimulationTopology(): void {
-  sim.rebuildTopology();
-  rebindAgents(sim);
 }
 
 // ---------------------------------------------------------------- input
@@ -1259,7 +1231,7 @@ function pointerDown(e: PointerEvent, r: DOMRect): void {
         if (e.shiftKey) {
           const b = doc.buildings.get(hitBuilding as BuildingId);
           if (b) {
-            mutate(() => { doc.buildings.put({ ...b, builtAt: sim.city.minutes(sim), decay: 0 }); return true; });
+            mutate(() => { doc.buildings.put({ ...b, builtAt: simHost.minutes, decay: 0 }); return true; });
             flashHint('hint.building.renovated');
           }
         }
@@ -1634,10 +1606,10 @@ const SLIDERS: Readonly<Record<string, ShellSlider>> = {
   atmoFog: { min: 0, max: 100, step: 5, get: () => atmosphere.atmoFog, set: (v) => { atmosphere.atmoFog = v; applyAtmosphere(); } },
   atmoFogHeight: { min: 5, max: 200, step: 5, get: () => atmosphere.atmoFogHeight, set: (v) => { atmosphere.atmoFogHeight = v; applyAtmosphere(); } },
   // The simulation: cars and people on foot as shares (%) of what the city's own density asks (`SimWorld.followCity`).
-  trafficIntensity: { min: 0, max: MAX_INTENSITY * 100, step: 10, get: () => Math.round(sim.trafficIntensity * 100),
-    set: (v) => { sim.trafficIntensity = v / 100; persistence.saveSettingsSoon(sessionSettings); } },
-  pedIntensity: { min: 0, max: MAX_INTENSITY * 100, step: 10, get: () => Math.round(sim.pedestrianIntensity * 100),
-    set: (v) => { sim.pedestrianIntensity = v / 100; persistence.saveSettingsSoon(sessionSettings); } },
+  trafficIntensity: { min: 0, max: MAX_INTENSITY * 100, step: 10, get: () => Math.round(simHost.settings.trafficIntensity * 100),
+    set: (v) => { simHost.set({ trafficIntensity: v / 100 }); persistence.saveSettingsSoon(sessionSettings); } },
+  pedIntensity: { min: 0, max: MAX_INTENSITY * 100, step: 10, get: () => Math.round(simHost.settings.pedestrianIntensity * 100),
+    set: (v) => { simHost.set({ pedestrianIntensity: v / 100 }); persistence.saveSettingsSoon(sessionSettings); } },
   // The roundabout tool's radius, metres.
   roundaboutRadius: { min: ROUNDABOUT_RADIUS_M[0], max: ROUNDABOUT_RADIUS_M[1], step: 4, get: () => Math.round(game.roundaboutRadius / UNITS_PER_METER),
     set: (v) => { gameState.set('roundaboutRadius', clamp(v, ROUNDABOUT_RADIUS_M[0], ROUNDABOUT_RADIUS_M[1]) * UNITS_PER_METER, 'roundabout size'); requestDraw(); } },
@@ -1761,7 +1733,7 @@ function mountInterface(): void {
     mapBiome,
     setMapBiome,
     mapAction: (name) => MAP_ACTIONS[name]?.(),
-    demand: () => sim.demandMultiplier,
+    demand: () => simHost.settings.demandMultiplier,
     setDemand,
     sliders: SLIDERS,
     onStatus: (listen) => { statusListeners.push(listen); listen(currentStatus()); },
@@ -1819,7 +1791,7 @@ setTimeout(mountInterface, 0);
 
 function setPaused(paused: boolean): void {
   gameState.set('paused', paused, paused ? 'paused' : 'simulation resumed');
-  sim.clock.paused = paused;
+  simHost.set({ paused });
   frameClock.restart();
   persistence.saveSettingsSoon(sessionSettings);
   requestDraw();
@@ -1829,7 +1801,7 @@ function setSpeed(speed: number): void {
   if (speed <= 0) setPaused(true);
   else {
     gameState.set('speed', speed, 'speed chosen');
-    sim.clock.speed = speed;
+    simHost.set({ speed });
     setPaused(false);
   }
 }
@@ -1837,7 +1809,7 @@ function setSpeed(speed: number): void {
 /** How much traffic the city asks for: Low, Normal or Peak. */
 function setDemand(value: number): void {
   if (!Number.isFinite(value) || value <= 0) return;
-  sim.demandMultiplier = value;
+  simHost.set({ demandMultiplier: value });
   persistence.saveSettingsSoon(sessionSettings);
 }
 
@@ -1938,7 +1910,7 @@ function growSlice(growing: NonNullable<typeof cityGrowth>): boolean {
         continue;
       }
       const fresh = doc.buildings.get(id as BuildingId);
-      if (fresh) doc.buildings.put({ ...fresh, builtAt: sim.city.minutes(sim), decay: 0, lotPlan: LOT_PLAN_VERSION });
+      if (fresh) doc.buildings.put({ ...fresh, builtAt: simHost.minutes, decay: 0, lotPlan: LOT_PLAN_VERSION });
       growing.left--;
     }
   });
@@ -2092,11 +2064,9 @@ function restoreSettings(settings: SavedSettings): void {
   restoreOrbit(settings.camera);
   // Through the game's state: setting the clock alone left `game.speed` and the speed buttons showing the speed before the
   gameState.set('speed', settings.speed, 'map loaded');
-  sim.clock.speed = settings.speed;
+  simHost.set({ speed: settings.speed });
   setPaused(settings.paused);
-  sim.trafficIntensity = settings.trafficIntensity;
-  sim.pedestrianIntensity = settings.pedestrianIntensity;
-  sim.demandMultiplier = settings.demandMultiplier ?? 1;
+  simHost.set({ trafficIntensity: settings.trafficIntensity, pedestrianIntensity: settings.pedestrianIntensity, demandMultiplier: settings.demandMultiplier ?? 1 });
   gameState.set('congestionOverlay', settings.congestionOverlay, 'map loaded');
   persistence.saveSettingsSoon(sessionSettings);
   requestDraw();
@@ -2293,9 +2263,6 @@ let actionsWarm = false;
 
 /** Set by an edit: draw the new geometry first, rebuild the simulation after. */
 let topologyAfterDraw = false;
-/** The traffic's topology catching up with an edit, a slice a frame (`frameLoop.ts`). */
-// The new junctions' conflict pairs measured on the other cores (`conflictPool.ts`).
-const topology = new TopologyCatchUp(new ConflictPool(ZONES_PREFIX));
 
 function requestDraw(): void {
   frameClock.request();
@@ -2308,14 +2275,14 @@ let zoneGrowthHold = { at: 0, until: 0 };
 function growZones(): void {
   // Buildings on zoned lots (`world/lots.ts`).
   const lotRefused = lotTool.refusedNow();
-  const now = sim.clock.time;
+  const now = simHost.time;
   // A hold set before the clock went back (a new map) holds nothing.
   if (mover.dragging || (now >= zoneGrowthHold.at && now < zoneGrowthHold.until)) return;
   // DO NOT read `doc.lots` here (`lots.some` walked every lot twice a second).
   const grown = caused('zone growth', () => {
     const id = growOnLot({ doc, net, groundAt: (x, y) => scene.terrainHeightAt(x, y), pavedAt: (x, y) => scene.pavedHeightAt(x, y) }, lotRefused, 0x5eed);
     const fresh = id === null ? undefined : doc.buildings.get(id as BuildingId);
-    if (fresh) doc.buildings.put({ ...fresh, builtAt: sim.city.minutes(sim), decay: 0, lotPlan: LOT_PLAN_VERSION });
+    if (fresh) doc.buildings.put({ ...fresh, builtAt: simHost.minutes, decay: 0, lotPlan: LOT_PLAN_VERSION });
     return id;
   });
   if (grown !== null) {
@@ -2364,7 +2331,7 @@ function frame(now: number): void {
   // The opening puts the town together in parts (`SceneHandle.worldBusy`)
   if (!worldShown && drawnOnce && !scene.worldBusy) worldShown = true;
   // Moving a node is an authoring preview.
-  let holdSim = mover.dragging || topologyAfterDraw || !worldShown;
+  const holdSim = mover.dragging || topologyAfterDraw || !worldShown;
   // A generated city being built (`generateCity`): its own share of the frame, apart from the traffic's topology.
   growCity();
   frameTimer.mark('growCity');
@@ -2373,20 +2340,10 @@ function frame(now: number): void {
     actionsWarm = true;
     void scene.effects();
   }
-  // The traffic's topology catching up with an edit, the simulation held while the workers measure the new junctions' pairs
-  if ((!holdSim || scene.opening) && topology.step(sim, net.trafficRevision, scene.worldBusy)) {
-    holdSim = true;
-    requestDraw();
-  }
-  // The simulation's derived products brought up to the topology (the engine's 'frame' phase).
-  if (!holdSim) engine.refresh('frame');
-  frameTimer.mark('topology');
-  const alpha = holdSim
-    ? 1
-    : sim.clock.advance(wall, () => step(sim, { traffic: !game.paused, pedestrians: !game.paused }), SIM_FRAME_BUDGET_MS);
-  if (!holdSim) sim.populationShare = populationGovernor.feed(sim.clock.lastSteps, sim.clock.lastStepMs, now / 1000, sim.vehicles.size, sim.pedViews.length);
+  // The simulation run for the frame's wall time (`sim/host.ts`): its topology catching up with an edit first, held meanwhile.
+  if (simHost.advance({ wall, hold: holdSim, opening: scene.opening, worldBusy: scene.worldBusy, focus: scene.focus, screenShare: screenShare() })) requestDraw();
   // The city's own periodic work, on its clock (`SimPeriodic`).
-  const simTime = sim.clock.time;
+  const simTime = simHost.time;
   if (growthDue.due(simTime)) growZones();
   if (decayDue.due(simTime)) decayWatch();
   actions.tick(simTime);
@@ -2408,7 +2365,11 @@ function frame(now: number): void {
     ? { poles: framePolePlan.poles.map((pole) => ({ x: pole.at.x, y: pole.at.y, lamp: pole.lamp, standing: pole.existing !== null })) }
     : null);
   frameTimer.mark('poles');
-  scene.draw(net, sim, alpha, wall, { holdRoads: terrainBrush.stroking });
+  scene.draw(net, shown, simHost.alpha, wall, {
+    holdRoads: terrainBrush.stroking,
+    paused: simHost.settings.paused,
+    getUp: (id, x, y, heading, seconds, crawl) => simHost.control.getUp(id, x, y, heading, seconds, crawl),
+  });
   frameTimer.mark('drawing');
   drawnOnce = true;
   drawOverlayScreen();
@@ -2419,7 +2380,7 @@ function frame(now: number): void {
     requestDraw();
   }
 
-  if (ZONES_PREFIX && zonesDue.due(wall)) writeDerivedMany(ZONES_PREFIX, sim.conflicts.takeMeasured());
+  if (ZONES_PREFIX && zonesDue.due(wall)) writeDerivedMany(ZONES_PREFIX, simHost.takeMeasured());
   if (flatCameraDue.due(wall)) syncFlatCameraFromView();
 
   if (panelsDue.due(wall)) {
@@ -2444,7 +2405,8 @@ function frame(now: number): void {
 
 /** Whether anything the simulation moves can be seen moving: vehicles, cars parking, people, signals, public transport. */
 function simShowsMotion(): boolean {
-  return sim.vehicles.size > 0 || sim.pedViews.length > 0 || sim.city.lots.moving() > 0 || sim.controllers.size > 0 || hasTransit(doc.transit);
+  const stats = shown.stats;
+  return stats.vehicles > 0 || stats.peds > 0 || stats.lotsMoving > 0 || stats.controllers > 0 || hasTransit(doc.transit);
 }
 
 /** The same hints as `drawOverlay`, projected instead of transformed. */
@@ -3256,7 +3218,7 @@ function showInspector(): void {
   openInspector(
     doc,
     net,
-    sim,
+    simHost.inspect,
     { segment: game.selectedSegment, node: game.selectedNode },
     {
       onUpgrade: (id) => {
@@ -3520,22 +3482,17 @@ const statusListeners: ((status: ShellStatus) => void)[] = [];
 /** The city's numbers now: the clock, the traffic, the money, the junctions that cannot be built. */
 function currentStatus(): ShellStatus {
   // The time of day and the residents' day (`sim/city`).
-  const minutes = sim.city.minutes(sim) % 1440;
-  let speedSum = 0;
-  let queued = 0;
-  for (const v of sim.vehicles.values()) {
-    speedSum += v.v;
-    if (v.v < 0.5) queued++;
-  }
+  const minutes = simHost.minutes % 1440;
+  const { speedSum, queued, vehicles } = shown.stats;
   return {
     clock: `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(Math.floor(minutes % 60)).padStart(2, '0')}`,
     // The cars driving into and out of the lots' bays are cars driving too (`sim/agents/lotTraffic.ts`).
-    vehicles: vehicleCountLabel(sim.vehicles.size + sim.city.lots.moving()),
-    people: peopleCountLabel(sim.pedViews.length),
+    vehicles: vehicleCountLabel(vehicles + shown.stats.lotsMoving),
+    people: peopleCountLabel(shown.stats.peds),
     // The city's numbers, computed all along and shown nowhere (audit P2-02).
-    trips: String(sim.completedTrips),
-    lost: String(sim.entryDemandLost),
-    meanSpeed: sim.vehicles.size ? `${Math.round((speedSum / sim.vehicles.size) * METERS_PER_UNIT * 3.6)} km/h` : '—',
+    trips: String(shown.stats.trips),
+    lost: String(shown.stats.lost),
+    meanSpeed: vehicles ? `${Math.round((speedSum / vehicles) * METERS_PER_UNIT * 3.6)} km/h` : '—',
     queued: String(queued),
     impossible: net.impossible.size,
     balance: doc.economy.balance,
@@ -3665,7 +3622,7 @@ function gpuLines(): string[] {
 /** The simulation's own checks (`sim/invariants.ts`, run every 60 ticks) in the health log */
 const issuesSeen = new WeakSet<object>();
 function noteSimulationIssues(): void {
-  for (const issue of sim.issues) {
+  for (const issue of simHost.issues()) {
     if (issuesSeen.has(issue)) continue;
     issuesSeen.add(issue);
     // Shown in the F9 monitor: the words from the dictionaries.
@@ -3687,7 +3644,7 @@ const healthPanel = mountHealthPanel({
       ...tools.latest(3).map((r) => `tool machine #${r.serial}: ${r.from} → ${r.to} (${r.event})`),
     ],
     wide: [...gpuLines(),
-      t('health.state.simulation', { ms: populationGovernor.stepMs.toFixed(1), share: Math.round(populationGovernor.share * 100), vehicles: sim.vehicles.size, people: sim.pedViews.length })],
+      t('health.state.simulation', { ms: simHost.health().stepMs.toFixed(1), share: Math.round(simHost.health().share * 100), vehicles: shown.stats.vehicles, people: shown.stats.peds })],
     changes: gameState.latest(n).map((c) => `${c.key}: ${valueText(c.from)} → ${valueText(c.to)} (${c.cause})`),
   }),
 });
@@ -3717,7 +3674,9 @@ const healthPanel = mountHealthPanel({
   ledger: () => Object.fromEntries(engine.ledger),
   doc,
   net,
-  sim,
+  /** The simulation's world where it runs on the page (`?sim=page`), null in its worker; `shown` is what is drawn of it. */
+  sim: simHost.world,
+  shown,
   camera,
   surface,
   DT,
@@ -3775,7 +3734,7 @@ const healthPanel = mountHealthPanel({
         nodes: doc.nodes.size, segments: doc.segments.size, buildings: doc.buildings.size, lots: doc.lots.length, poles: doc.poles.size,
         landscape: doc.landscape.size, barriers: doc.barriers.size, trees: doc.trees.length, zones: doc.zones.length, people: doc.people.length,
       },
-      sim: { vehicles: sim.vehicles.size, people: sim.pedViews.length },
+      sim: { vehicles: shown.stats.vehicles, people: shown.stats.peds },
       gl: { geometries: scene.gl.info.memory.geometries, textures: scene.gl.info.memory.textures, programs: scene.gl.info.programs?.length ?? 0, drawCalls: scene.stats.drawCalls, triangles: scene.stats.triangles },
       heapMB: heap === undefined ? null : Math.round(heap / 1e6),
     };
@@ -3819,9 +3778,7 @@ ${JSON.stringify(counts)}`;
   },
   /** Runs the simulation for `seconds` of SIMULATION time, immediately. */
   runSim: (seconds: number) => {
-    sim.clock.run(Math.max(0, Math.round(seconds / DT)), () =>
-      step(sim, { traffic: true, pedestrians: true }),
-    );
+    simHost.run(seconds);
     requestDraw();
   },
   pickAtScreen: (x: number, y: number) =>
@@ -3840,7 +3797,7 @@ ${JSON.stringify(counts)}`;
       return mutateBuilt(() => commitPoleRun(doc, plan));
     },
   },
-  audit: () => [...sim.issues],
+  audit: () => [...simHost.issues()],
   /** The live three.js scene handle, for browser-driven checks. */
   scene: () => scene,
   /** The orbit camera (`setOrbit(azimuth, elevation)`), for photographing from a chosen angle. */
@@ -3848,7 +3805,7 @@ ${JSON.stringify(counts)}`;
   /** The building tool, for browser-driven checks. */
   buildings: buildings.tool,
   /** One fixed simulation step, as the game takes it, without traffic or new pedestrians if asked. */
-  step: (traffic = true, pedestrians = true) => step(sim, { traffic, pedestrians }),
+  step: (traffic = true, pedestrians = true) => simHost.step(traffic, pedestrians),
 };
 
 /** A polyline with points added so no step is longer than `step`. */
@@ -3872,7 +3829,7 @@ function refreshShell(): void {
 
 // Buildings run down without maintenance (`world/buildings/decayWatch.ts`)
 const decayLook = createDecayWatch(doc, (id, decay) => caused('building wear', () => doc.buildings.wear(id, decay)));
-const decayWatch = (): void => { if (decayLook(sim.city.minutes(sim))) requestDraw(); };
+const decayWatch = (): void => { if (decayLook(simHost.minutes)) requestDraw(); };
 /** The buildings' decay looked at every 3 s of the city's time (`frame`), not on the wall clock. */
 const decayDue = new SimPeriodic(3);
 
@@ -3880,7 +3837,9 @@ const decayDue = new SimPeriodic(3);
 const actions = createActions({
   doc,
   net,
-  sim,
+  sim: shown,
+  control: simHost.control,
+  time: () => simHost.time,
   scene,
   buildingAt: (screen) => buildings.tool.buildingAt(screen),
   view: () => view,
@@ -3891,7 +3850,7 @@ const actions = createActions({
   caused: (cause, fn) => caused(cause, fn),
   hint: (key) => flashHint(key),
   redraw: () => requestDraw(),
-  holdGrowth: (seconds) => { zoneGrowthHold = { at: sim.clock.time, until: sim.clock.time + seconds }; },
+  holdGrowth: (seconds) => { zoneGrowthHold = { at: simHost.time, until: simHost.time + seconds }; },
 });
 
 // Everything is set up: the first frame may be drawn.

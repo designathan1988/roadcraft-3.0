@@ -1,10 +1,9 @@
-import { walkersNear } from '@sim/agents/walk';
 import type { BodyPart } from '@sim/people/view';
 import type { Occupant } from '@render/ragdoll';
 import type { BlastHit, SceneHandle } from '@render/renderer';
-import { vehiclePose } from '@sim/pose';
-import { strandVehicle } from '@sim/vehicles/state';
-import type { SimWorld } from '@sim/world';
+import { newPose } from '@sim/pose';
+import type { SimControl } from '@sim/host';
+import { type SimMirror, shownPoseInto } from '@sim/mirror';
 import type { Viewport } from '@view/viewport';
 import type { Vec2 } from '@core/vec2';
 import { closestOnSegment } from '@core/intersect';
@@ -16,6 +15,7 @@ import { type Building, type BuildingId } from '@world/buildings/types';
 import { levelElevation, solidFootprints, volumeElevation, worldToLocal } from '@world/buildings/geometry';
 import { resolveBlocks } from '@world/buildings/blocks';
 import { signalPosts } from '@world/signalPosts';
+import type { SignalGroups } from '@world/signalPosts';
 import { m, stepsIn } from '@world/units';
 import { editRng } from '@editor/editStream';
 import { MAX_STOREYS, MAX_STOREY_HEIGHT } from '@world/buildings/types';
@@ -31,7 +31,11 @@ const FIRE_STEP = 0.5;
 export interface ActionsDeps {
   readonly doc: RoadDoc;
   readonly net: Network;
-  readonly sim: SimWorld;
+  /** The simulation as the page sees it, and what the page does to it (`sim/host.ts`). */
+  readonly sim: SimMirror;
+  readonly control: SimControl;
+  /** The simulation's clock, seconds (`SimClock.time`). */
+  time(): number;
   readonly scene: SceneHandle;
   /** The building drawn under a screen point (`buildingsWiring.ts` tool). */
   buildingAt(screen: Vec2): number | null;
@@ -64,7 +68,13 @@ export interface Actions {
 }
 
 export function createActions(deps: ActionsDeps): Actions {
-  const { doc, net, sim, scene } = deps;
+  const { doc, net, sim, scene, control } = deps;
+  /** The traffic's signalised junctions as the page sees them (`SimMirror`). */
+  const signals: SignalGroups = { nodes: () => sim.junctionNodesInOrder(), groupsOf: (node) => sim.junctionGroups(node) ?? undefined };
+  const pose = newPose();
+  /** The people out walking within `radius` of (x, y), as the page sees them. */
+  const walkersNear = (x: number, y: number, radius: number): { id: number; x: number; y: number; heading: number }[] =>
+    sim.pedViews.filter((p) => Math.hypot(p.x - x, p.y - y) < radius).map((p) => ({ id: p.id, x: p.x, y: p.y, heading: p.heading }));
   const ground = (p: Vec2): number => deps.heightAt(p);
 
   /** Shots each vehicle has taken on its bodywork: enough of them and it burns and blows up. */
@@ -83,7 +93,7 @@ export function createActions(deps: ActionsDeps): Actions {
     const view = deps.view();
     const under = view.toWorldAt(sx, sy, ground(view.toWorld(sx, sy, w, h)), w, h);
     let best: { id: number; height: number; d: number; x: number; y: number; heading: number } | null = null;
-    for (const p of walkersNear(sim, under.x, under.y, m(25))) {
+    for (const p of walkersNear(under.x, under.y, m(25))) {
       // Down on the ground: their body is shot where it lies (below).
       if (scene.isDown(p.id)) continue;
       const base = ground(p);
@@ -103,8 +113,10 @@ export function createActions(deps: ActionsDeps): Actions {
       const hit = scene.shootBody([a.x, a.y, hi], [b.x, b.y, lo]);
       if (hit && hit !== 'hit') {
         const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-        const done = sim.pedEngine.shot?.(sim, hit.alive, hit.part, b.x - ((b.x - a.x) / len) * m(10), b.y - ((b.y - a.y) / len) * m(10));
-        if (done) scene.wound(b.x, b.y, lo + m(0.4), (b.x - a.x) / len, (b.y - a.y) / len, done.severed);
+        void control.shoot(hit.alive, hit.part, b.x - ((b.x - a.x) / len) * m(10), b.y - ((b.y - a.y) / len) * m(10)).then((done) => {
+          if (done) scene.wound(b.x, b.y, lo + m(0.4), (b.x - a.x) / len, (b.y - a.y) / len, done.severed);
+          deps.redraw();
+        });
       }
       if (hit) { deps.redraw(); return true; }
       if (shootVehicle(a, b, hi, lo)) { deps.redraw(); return true; }
@@ -123,19 +135,20 @@ export function createActions(deps: ActionsDeps): Actions {
     const part: BodyPart = best.height > m(1.5) ? 'head'
       : best.height > m(0.9) ? (Math.abs(side) > m(0.17) ? (side > 0 ? 'armL' : 'armR') : 'torso')
         : side >= 0 ? 'legL' : 'legR';
-    const done = sim.pedEngine.shot?.(sim, best.id, part, best.x - dx * m(10), best.y - dy * m(10));
-    if (!done) return false;
-    scene.wound(best.x, best.y, ground(best) + best.height, dx, dy, done.severed);
-    deps.redraw();
+    const shot = best;
+    void control.shoot(shot.id, part, shot.x - dx * m(10), shot.y - dy * m(10)).then((done) => {
+      if (!done) return;
+      scene.wound(shot.x, shot.y, ground(shot) + shot.height, dx, dy, done.severed);
+      deps.redraw();
+    });
     return true;
   }
 
   /** A shot along the line of sight from `a` (height `hi`) to `b` */
   function shootVehicle(a: Vec2, b: Vec2, hi: number, lo: number): boolean {
-    let best: { v: ReturnType<typeof sim.vehicles.get> & object; t: number; x: number; y: number; z: number; up: number; angle: number } | null = null;
-    for (const v of sim.vehicles.values()) {
-      const pose = vehiclePose(sim, v, 1);
-      if (!pose) continue;
+    let best: { v: (typeof sim.road)[number]; t: number; x: number; y: number; z: number; up: number; angle: number } | null = null;
+    for (const v of sim.road) {
+      shownPoseInto(v, 1, pose);
       const g = ground(pose.p);
       const c = Math.cos(pose.angle), s = Math.sin(pose.angle);
       // A rider sits above a two-wheeler's frame: the box up to their head.
@@ -171,21 +184,21 @@ export function createActions(deps: ActionsDeps): Actions {
       scene.flingOccupants([{ id: 8_000_000 + v.id, x, y, z: g + m(0.9), heading: best.angle, blastX: x - dirX * m(4), blastY: y - dirY * m(4),
         power: 0.15, kind: 'dead', index: scene.driverBody(v, x, y) }]);
       scene.dropVehicle({ id: v.id, archetype: v.archetype, x, y, angle: best.angle, color, dirX, dirY });
-      sim.removeVehicle(v);
+      control.removeVehicle(v.id);
       vehicleShots.delete(v.id);
       return true;
     }
     // Through the glass (the upper part of the body): the driver killed, the car rolling to a stop.
     const glass = best.up > 0.55;
     scene.vehicleHit(x, y, z, dirX, dirY, glass, glass);
-    if (glass) strandVehicle(v);
+    if (glass) control.strand(v.id);
     const n = (vehicleShots.get(v.id) ?? 0) + 1;
     vehicleShots.set(v.id, n);
     if (vehicleShots.size > 200) vehicleShots.clear();
     if (n >= 12) {
       vehicleShots.delete(v.id);
-      const pose = vehiclePose(sim, v, 1);
-      if (pose) explodeAt(pose.p, ground(pose.p), null, 3);
+      shownPoseInto(v, 1, pose);
+      explodeAt({ x: pose.p.x, y: pose.p.y }, ground(pose.p), null, 3);
     }
     return true;
   }
@@ -210,7 +223,7 @@ export function createActions(deps: ActionsDeps): Actions {
   function explodeAt(world: Vec2, z: number, b: Building | null, strength: number, quiet = false): void {
     const radius = m(2.5 + strength * 1.1);
     const kill = radius * 0.5, scare = m(70 + strength * 10);
-    const dead = sim.pedEngine.impact?.(sim, world.x, world.y, kill, scare) ?? 0;
+    const deaths = control.impact(world.x, world.y, kill, scare);
     const near = (x: number, y: number, reach: number): boolean => Math.hypot(x - world.x, y - world.y) < reach;
     const paved = Number.isFinite(scene.pavedHeightAt(world.x, world.y));
     const struck: BlastHit['ground'] = b && z > ground(world) + m(0.5) ? 'building' : paved ? 'road' : 'earth';
@@ -306,7 +319,7 @@ export function createActions(deps: ActionsDeps): Actions {
         changed = true;
       }
       // The posts of the junctions on the roads within reach only (`near`)
-      for (const post of signalPosts(net, sim.graph, { x: world.x, y: world.y, radius })) {
+      for (const post of signalPosts(net, signals, { x: world.x, y: world.y, radius })) {
         if (!near(post.x, post.y, radius)) continue;
         hit.posts.push({ x: post.x, y: post.y, yaw: post.yaw });
         if (doc.node(post.node)?.control !== 'none') { doc.setNodeControl(post.node, 'none'); changed = true; }
@@ -335,15 +348,15 @@ export function createActions(deps: ActionsDeps): Actions {
         blastX: world.x, blastY: world.y, power: Math.max(0.3, 1 - d / (radius * 1.1)),
         kind: close && Math.random() < 0.5 ? 'torn' : 'dead', charred: !rider || close, index });
     };
-    for (const v of [...sim.vehicles.values()]) {
-      const pose = vehiclePose(sim, v, 1);
-      if (!pose || !near(pose.p.x, pose.p.y, radius * 1.1)) continue;
+    for (const v of [...sim.road]) {
+      shownPoseInto(v, 1, pose);
+      if (!near(pose.p.x, pose.p.y, radius * 1.1)) continue;
       const css = String(v.color ?? '#777777');
       const p = pose.p;
       hit.vehicles.push({ x: p.x, y: p.y, angle: pose.angle, length: v.archetype.length, width: v.archetype.width,
         height: v.archetype.height, color: parseInt(css.replace('#', '').slice(0, 6), 16) || 0x777777, id: v.id, archetype: v.archetype });
       throwAboard(v.id, p.x, p.y, pose.angle, v.archetype.shape === 'bicycle' || v.archetype.shape === 'motorcycle', scene.driverBody(v, pose.p.x, pose.p.y));
-      sim.removeVehicle(v);
+      control.removeVehicle(v.id);
     }
     (globalThis as Record<string, unknown>)['__lastBlast'] = { ...hit, radius, at: world };
     scene.explode(world.x, world.y, z, radius, hit);
@@ -357,7 +370,7 @@ export function createActions(deps: ActionsDeps): Actions {
     }
     if (struck === 'road') scene.strikeGround(world.x, world.y, strength);
     if (downs > 0 || hit.poles.length || hit.vehicles.length) deps.holdGrowth(90);
-    if (!quiet) deps.hint(downs > 0 ? 'hint.strike.down' : dead > 0 ? 'hint.strike.deaths' : b ? 'hint.strike.hit' : 'hint.strike.ground');
+    if (!quiet) void deaths.then((dead) => deps.hint(downs > 0 ? 'hint.strike.down' : dead > 0 ? 'hint.strike.deaths' : b ? 'hint.strike.hit' : 'hint.strike.ground'));
     if (b && doc.buildings.has(b.id)) ignite(b.id);
     deps.redraw();
   }
@@ -391,7 +404,7 @@ export function createActions(deps: ActionsDeps): Actions {
   /** Buildings on fire the player's order of 2026-10-05: the fire spreading over the neighbouring buildings, as it happens */
   function ignite(id: number): void {
     if (burning.has(id) || burning.size >= 3) return;
-    const now = sim.clock.time;
+    const now = deps.time();
     burning.set(id, { since: now, nextFlame: now, until: now + 50 + Math.random() * 40 });
   }
   /** DO NOT go back to a `setInterval` on the wall clock */

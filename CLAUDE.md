@@ -111,8 +111,9 @@ GPU memory and drawing
   terrain plates with content have no LOD (`flatAtlas.ts:104`).
 
 Main thread
-- The simulation runs on the page (`main.ts:2797`, `SIM_FRAME_BUDGET_MS`). Fix: `SimWorld` in a
-  worker fed by diary deltas, poses in shared memory, COOP/COEP in Vite and Electron.
+- The simulation's worker (`sim.worker.ts`) keeps a whole copy of every building record
+  (`world/replica.ts`): the agents read few of their fields. Fix: a record of what the sim reads.
+- The page still rebuilds the network for drawing, and the worker its own from the replica.
 - City growth and power-line layout are sliced (`main.ts:2200-2273` `GROW_SLICE_MS`,
   `roads/powerLine.ts:39`): amortization. The worker version is on `fix/growth-worker`.
 - Nature: one plate swept per frame (`renderer.ts:2359-2393`) and `new CandidateKeep` with every
@@ -227,6 +228,9 @@ is hidden every frame (no overdraw).
   only the player changes them.
 
 **sim**
+- It runs in `sim.worker.ts` on a copy of the document fed by the diary (`world/replica.ts`); the
+  page draws `SimMirror` (`sim/frame.ts`, `sim/mirror.ts`). A new field drawn goes in the frame.
+  `?sim=page` runs it on the page (`__roadcraft.sim` is the world only then).
 - One writer per field; stage order in `pipeline.ts`. `clock.tick` only at the end of `step`.
 - `archetype` is the machine, `driver` is the person. A lane change occupies two lanes (`bodiesIn`).
 - A signal stage never groups crossing movements (`signals/plan.ts`).

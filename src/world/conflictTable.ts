@@ -252,7 +252,7 @@ function boundsOf(s: SweepSamples): { minX: number; minY: number; maxX: number; 
 }
 
 /** A sweep's HEAVY rectangles bounded: per sample its half extents along x and y, and per `CHUNK` samples their box. */
-export interface SweepBoxes {
+interface SweepBoxes {
   readonly ext: Float64Array;
   /** Per chunk: min x, min y, max x, max y. */
   readonly chunks: Float64Array;

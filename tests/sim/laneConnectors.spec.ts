@@ -7,6 +7,7 @@ import { roadProfile, sectionFromProfile } from '@world/roadTypes';
 import { normalizeRoadSection, flipSection, sameRoadSection } from '@world/roadSection';
 import { toggleLaneLink } from '@world/roads/connectors';
 import { nodeLanes } from '@ui/roads/connectorPanel';
+import { junctionTraffic } from '@sim/inspect';
 import { layoutDoc, simOf } from './support/bodies';
 
 /** LANE CONNECTORS, LANE USES AND LINES, run as the traffic drives them */
@@ -63,7 +64,7 @@ describe('lane connections by hand', () => {
     const { doc, centre } = layoutDoc(AVENUES);
     const [north] = legs(doc) as [SegmentId];
     const sim = simOf(doc, 1, 0);
-    const lanes = nodeLanes(sim.graph, centre)!;
+    const lanes = nodeLanes(junctionTraffic(sim, centre), centre)!;
     const built = lanes.built.filter((l) => l.from === north && l.fromLane === 0);
     expect(built.length).toBeGreaterThan(1);
     // Taking one away keeps the others.

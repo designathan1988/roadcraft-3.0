@@ -5,8 +5,15 @@ import { PED } from '../params';
 export type SignalState = 'green' | 'amber' | 'red';
 export type WalkState = 'walk' | 'flash' | 'dont';
 
+/** What `signalStateFor` reads of a signal: the simulation's controller, or the page's (`sim/mirror.ts` `ShownController`). */
+export interface SignalStage {
+  readonly plan: { readonly stages: readonly { readonly greenGroups: readonly GroupId[] }[] };
+  readonly stageIndex: number;
+  readonly sub: string;
+}
+
 /** Signal state for one approach group. */
-export function signalStateFor(c: SignalController, group: GroupId): SignalState {
+export function signalStateFor(c: SignalStage, group: GroupId): SignalState {
   const st = c.plan.stages[c.stageIndex];
   if (!st) return 'red';
   if (!st.greenGroups.includes(group)) return 'red';

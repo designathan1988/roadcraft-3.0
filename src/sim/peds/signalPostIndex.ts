@@ -2,7 +2,7 @@ import type { RoadDoc } from '@world/doc';
 import type { NodeId } from '@world/ids';
 import type { LaneletGraph } from '@world/lanelets';
 import type { Network } from '@world/network';
-import { type SignalPost, signalPostPlace, signalPosts } from '@world/signalPosts';
+import { type SignalPost, signalGroupsOf, signalPostPlace, signalPosts } from '@world/signalPosts';
 import { m } from '@world/units';
 
 /** DO NOT import `SimWorld`: `sim/world.ts` imports this file, and the type import closed an import cycle */
@@ -63,7 +63,7 @@ export class SignalPostIndex {
 
   /** @rebuild Every post of the map placed: the junctions were rebuilt (an edit of the roads, a new map). */
   private placeAll(w: SignalPostWorld): void {
-    for (const post of signalPosts(w.net, w.graph)) this.file(post);
+    for (const post of signalPosts(w.net, signalGroupsOf(w.graph))) this.file(post);
   }
 
   private file(post: SignalPost): void {

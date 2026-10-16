@@ -26,7 +26,8 @@ describe('the frame and the world rebuild', () => {
     expect(at).toBeGreaterThan(-1);
     const block = frame.slice(at, frame.indexOf('}', at));
     expect(block).not.toMatch(/rebuildSimulationTopology|rebuildTopology|rebuildVehicleTopology/);
-    expect(frame).toMatch(/topology\.step\(sim,/);
+    expect(frame).toMatch(/simHost\.advance\(/);
+    expect(read('src/sim/host.ts')).toMatch(/this\.topology\.step\(w,/);
   });
 
   it('builds the world sliced, its roads shaped by the tile workers', () => {

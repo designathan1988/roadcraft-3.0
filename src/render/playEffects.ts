@@ -13,10 +13,9 @@ import {
 } from 'three';
 import type { BodyPart, Severable } from '@sim/people/view';
 import type { Archetype } from '@sim/vehicles/archetypes';
-import type { SimWorld } from '@sim/world';
-import { takeWounds } from '@sim/people/casualties';
-import { impactCasualties } from '@sim/people/casualties';
-import { newPose, vehiclePoseInto } from '@sim/pose';
+import { type SimMirror, shownPoseInto } from '@sim/mirror';
+import type { RoadDoc } from '@world/doc';
+import { newPose } from '@sim/pose';
 import { solidsOf } from '@world/solids';
 import { floorHeight } from '@world/buildings/foundation';
 import { roofHeightAt, roofRise, volumeCorners, volumeElevation, worldToLocal } from '@world/buildings/geometry';
@@ -55,13 +54,17 @@ export interface PlayEffectsContext {
   readonly lights: { readonly muzzle: PointLight; readonly blast: PointLight };
 }
 
+/** Somebody a ragdoll held stands up again at (x, y) facing `heading` in `seconds`, or crawls off (`PedestrianEngine.getUp`). */
+export type GetUp = (id: number, x: number, y: number, heading: number, seconds: number, crawl?: boolean) => void;
+
 export interface PlayEffects {
   /** The effects' own seconds for a frame of `wallDt` (the weapons lab slows, stops and steps them). */
   clock(wallDt: number): number;
   setEffectsSpeed(speed: number): void;
   stepEffects(seconds: number): void;
   /** The bodies posed and drawn with the crowd's meshes (`AgentRenderOptions.ragdolls`). */
-  frame(citizens: RagdollCitizens, sim: SimWorld, wallDt: number, fxDt: number): void;
+  /** `getUp`: somebody a ragdoll held up again where the body came to rest (`PedestrianEngine.getUp`), or crawling. */
+  frame(citizens: RagdollCitizens, sim: SimMirror, doc: RoadDoc, getUp: GetUp, wallDt: number, fxDt: number): void;
   /** Somebody whose own body lies on the ground: not drawn standing as well. */
   hides(id: number): boolean;
   /** Debris, ruins, blood stains, tracers: after the agents. */
@@ -174,10 +177,12 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
   const gore = createGore();
   scene.add(gore.group);
   /** The world drawn this frame, for the walls a body strikes. */
-  let ragdollSim: SimWorld | null = null;
+  let ragdollSim: SimMirror | null = null;
+  let ragdollDoc: RoadDoc | null = null;
+  let ragdollGetUp: GetUp | null = null;
   const ragdolls = createRagdolls(exhaust, (id, x, y, heading, seconds, crawl) => {
     // Up again where the body came to rest (`PeopleEngine.getUp`), or onto hands and knees to crawl.
-    if (ragdollSim) ragdollSim.pedEngine.getUp?.(ragdollSim, id, x, y, heading, seconds, crawl);
+    ragdollGetUp?.(id, x, y, heading, seconds, crawl);
   }, gore);
   (globalThis as Record<string, unknown>)['__ragdolls'] = ragdolls;
   /** Who is down (a `fall` pause) this frame. */
@@ -189,7 +194,7 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
   /** DO NOT file the town's buildings again here */
   const LOT_GROW = m(2);
   const lotsAt = (x: number, y: number): readonly Building[] =>
-    ragdollSim?.doc.buildings.near(x - LOT_GROW, y - LOT_GROW, x + LOT_GROW, y + LOT_GROW) ?? [];
+    ragdollDoc?.buildings.near(x - LOT_GROW, y - LOT_GROW, x + LOT_GROW, y + LOT_GROW) ?? [];
   /** The ground at a corner of the bodies' ground grid (0.2 units a cell): a lot's yard as drawn, else the paving (a footway stands over the terrain), else the terrain. */
   const ragdollCorner = (ix: number, iy: number): number => {
     const key = ix * 100003 + iy;
@@ -211,21 +216,21 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
   /** A vehicle as a body sees it: where it stands and the box it fills. */
   interface VehicleBox { x: number; y: number; angle: number; hl: number; hw: number; height: number }
   /** DO NOT walk and pose the whole fleet for every body that falls */
-  const vehicleBoxes = { sim: null as SimWorld | null, tick: -1, list: [] as VehicleBox[] };
+  const vehicleBoxes = { sim: null as SimMirror | null, tick: -1, list: [] as VehicleBox[] };
   const poseScratch = newPose();
-  const boxesAtThisTick = (sim: SimWorld): readonly VehicleBox[] => {
-    if (vehicleBoxes.sim === sim && vehicleBoxes.tick === sim.clock.tick) return vehicleBoxes.list;
+  const boxesAtThisTick = (sim: SimMirror): readonly VehicleBox[] => {
+    if (vehicleBoxes.sim === sim && vehicleBoxes.tick === sim.tick) return vehicleBoxes.list;
     const list: VehicleBox[] = [];
-    for (const v of sim.vehiclesInIdOrder()) {
-      if (!vehiclePoseInto(sim, v, 1, poseScratch)) continue;
+    for (const v of sim.road) {
+      shownPoseInto(v, 1, poseScratch);
       list.push({ x: poseScratch.p.x, y: poseScratch.p.y, angle: poseScratch.angle, hl: v.archetype.length / 2, hw: v.archetype.width / 2, height: v.archetype.height });
     }
-    for (const v of sim.ambient.parked) {
+    for (const v of sim.parked.values()) {
       if (!v.free) continue;
       list.push({ x: v.free.x, y: v.free.y, angle: v.free.angle, hl: v.archetype.length / 2, hw: v.archetype.width / 2, height: v.archetype.height });
     }
     vehicleBoxes.sim = sim;
-    vehicleBoxes.tick = sim.clock.tick;
+    vehicleBoxes.tick = sim.tick;
     vehicleBoxes.list = list;
     return list;
   };
@@ -240,7 +245,7 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
       // The buildings standing (not a ruin) and the walls, fences and hedges of their lots.
       const out: RagdollWall[] = [];
       // The heights found stand until the ground under them changes
-      const land = ragdollSim?.doc;
+      const land = ragdollDoc;
       const serial = land ? `${land.changes.serialOf('roads', 'terrain', 'lots')}:${land.buildings.size}:${destruction.ruined.size}` : '';
       if (serial !== ragdollGroundSerial) {
         ragdollGround.clear();
@@ -262,7 +267,7 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
         }
       }
       // Everything else standing there (the player, 2026-10-06: a body goes through nothing)
-      const doc = ragdollSim?.doc;
+      const doc = ragdollDoc;
       if (doc) {
         for (const s of solidsOf(doc).near(x, y, reach)) {
           const ground = ctx.renderedHeightAt(s.kind === 'disc' ? s.c.x : s.a.x, s.kind === 'disc' ? s.c.y : s.a.y);
@@ -324,11 +329,13 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
     },
     setEffectsSpeed(speed) { fxSpeed = Math.max(0, speed); onAssetsReady(); },
     stepEffects(seconds) { fxStep += Math.max(0, seconds); onAssetsReady(); },
-    frame(citizens, sim, wallDt, fxDt) {
+    frame(citizens, sim, doc, getUp, wallDt, fxDt) {
       ragdollSim = sim;
+      ragdollDoc = doc;
+      ragdollGetUp = getUp;
       // Bullet holes on the people shot, alive or not (`recordWound`).
-      for (const wd of takeWounds(sim)) citizens.wound?.(-1 - wd.id, wd.part, wd.fromX, wd.fromY);
-      ragdolls.absorb(impactCasualties(sim, wallDt), citizens, ragdollWorld);
+      for (const wd of sim.takeWounds()) citizens.wound?.(-1 - wd.id, wd.part, wd.fromX, wd.fromY);
+      ragdolls.absorb(sim.casualties.advance(wallDt), citizens, ragdollWorld);
       if (occupantQueue.length) { ragdolls.fling(occupantQueue, citizens, ragdollWorld); occupantQueue.length = 0; }
       // Somebody tripping on the pavement falls as a ragdoll too.
       ragdollDown.clear();

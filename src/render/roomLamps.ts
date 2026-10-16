@@ -1,4 +1,4 @@
-import type { SimWorld } from '@sim/world';
+import type { RoadDoc } from '@world/doc';
 import { floorHeight, type GroundAt, type PavedAt } from '@world/buildings/foundation';
 import { levelElevation, levelHeight, liftAt, localToWorld } from '@world/buildings/geometry';
 import { LAMP_KINDS, interiorAt } from '@world/buildings/interior';
@@ -11,11 +11,11 @@ export class RoomLamps {
   /** DO NOT clear them all on `buildings.revision`: any building of the town grown or aged threw every height away. */
   private readonly floors = new WeakMap<Building, Map<number, number>>();
 
-  lamps(world: SimWorld, spec: CutawaySpec | null, groundAt: GroundAt, pavedAt: PavedAt, max: number): { x: number; y: number; z: number }[] {
+  lamps(doc: RoadDoc, spec: CutawaySpec | null, groundAt: GroundAt, pavedAt: PavedAt, max: number): { x: number; y: number; z: number }[] {
     const out: { x: number; y: number; z: number }[] = [];
     if (!spec) return out;
     // DO NOT walk `buildings.all()`: this runs every frame the cutaway is open, the whole town each time.
-    const buildings = world.doc.buildings;
+    const buildings = doc.buildings;
     const only = spec.only !== undefined ? buildings.get(spec.only) : undefined;
     const candidates = spec.only !== undefined ? (only ? [only] : [])
       : buildings.near(spec.x - spec.radius, spec.y - spec.radius, spec.x + spec.radius, spec.y + spec.radius);

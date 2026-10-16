@@ -2,16 +2,18 @@ import type { NodeId, SegmentId } from '@world/ids';
 import { movementKey, type JunctionControl, type RoadDoc } from '@world/doc';
 import { type ApproachRule, type ApproachRuleEntry, GREEN_LIMITS, OFFSET_LIMIT, type SignalSettings, legRule, mainRoadLegs } from '@world/roads/rules';
 import { UNITS_PER_METER } from '@world/units';
-import type { SimWorld } from '@sim/world';
-import { greenWave } from '@sim/roads/greenWave';
+import type { JunctionTraffic } from '@sim/inspect';
 import { formatDecimal, t } from '../i18n';
 import './roads.css';
 
 /** THE JUNCTION PANEL, in the inspector: the junction's height, its control as buttons */
 export interface JunctionPanelHost {
   readonly doc: RoadDoc;
-  readonly sim: SimWorld;
   readonly node: NodeId;
+  /** The junction as the traffic has it (`sim/inspect.ts`): undefined while the answer is on its way. */
+  readonly traffic: () => JunctionTraffic | null | undefined;
+  /** The corridor's signals timed as a green wave (`sim/roads/greenWave.ts`). */
+  greenWave(): Promise<ReadonlyMap<NodeId, SignalSettings>>;
   setHeight(metres: number): void;
   setControl(control: JunctionControl): void;
   setRules(rules: ApproachRuleEntry[] | undefined): void;
@@ -48,7 +50,8 @@ function compassOf(doc: RoadDoc, nodeId: NodeId, seg: { a: NodeId; b: NodeId }):
 let flowsShown: HTMLElement | null = null;
 
 export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHost): void {
-  const { doc, sim, node } = host;
+  const { doc, node } = host;
+  const traffic = host.traffic();
   screenOf = host.project;
   const n = doc.node(node);
   if (!n) return;
@@ -70,9 +73,9 @@ export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHo
   const seg = segmented(controls, n.control, (c) => t(`junction.control.${c}`), (c) => host.setControl(c), 'dense');
   seg.dataset['role'] = 'junctionControl';
   block.append(seg);
-  const signalised = sim.graph.junctions.get(node)?.signalised === true;
+  const signalised = traffic?.signalised === true;
   if (n.control === 'auto') {
-    const choice = sim.advisor.choice(node) ?? (signalised ? 'signal' : 'priority');
+    const choice = traffic?.autoChoice ?? (signalised ? 'signal' : 'priority');
     const note = div('rp-note');
     note.dataset['role'] = 'autoChoice';
     note.textContent = t('junction.autoChoice', { choice: t(`junction.auto.${choice}`) });
@@ -98,7 +101,7 @@ export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHo
     name.textContent = `${compassOf(doc, node, segment)}${main?.includes(id) ? ` · ${t('junction.mainRoad')}` : ''}`;
     const value = document.createElement('strong');
     value.dataset['segment'] = String(id);
-    value.textContent = t('junction.perHour', { n: Math.round(sim.flow.rate(node, id)) });
+    value.textContent = flowText(traffic, id);
     r.append(name, value);
     flows.append(r);
   }
@@ -127,20 +130,20 @@ export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHo
   }
 
   // The signal's timing.
-  const ctl = sim.controllers.get(node);
+  const ctl = traffic?.signal;
   if (signalised && ctl) {
     const s = n.signal;
     const block2 = div('rp-block');
     block2.append(head(t('junction.signal')));
     block2.append(row(t('junction.signalMode'), segmented(['adaptive', 'fixed'] as const, s?.mode === 'fixed' ? 'fixed' : 'adaptive',
       (m) => t(`junction.mode.${m}`), (m) => host.setSignal(m === 'fixed'
-        ? { ...s, mode: 'fixed', greens: ctl.plan.stages.map((st) => Math.round(st.targetGreen)) }
+        ? { ...s, mode: 'fixed', greens: ctl.targetGreens.map((g) => Math.round(g)) }
         : withoutFixed(s)))));
     if (s?.mode === 'fixed') {
-      ctl.plan.stages.forEach((st, i) => {
-        const green = s.greens?.[i] ?? Math.round(st.targetGreen);
+      ctl.targetGreens.forEach((target, i) => {
+        const green = s.greens?.[i] ?? Math.round(target);
         const set = (g: number): void => {
-          const greens = ctl.plan.stages.map((x, k) => s.greens?.[k] ?? Math.round(x.targetGreen));
+          const greens = ctl.targetGreens.map((x, k) => s.greens?.[k] ?? Math.round(x));
           greens[i] = Math.max(GREEN_LIMITS[0], Math.min(GREEN_LIMITS[1], g));
           host.setSignal({ ...s, greens });
         };
@@ -153,9 +156,10 @@ export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHo
         t('junction.earlier'), t('junction.later'))));
     }
     const wave = button(t('junction.greenWave'), () => {
-      const plan = greenWave(sim, node);
-      if (plan.size) host.setSignals(plan);
-      else waveNote.textContent = t('junction.greenWaveNone');
+      void host.greenWave().then((plan) => {
+        if (plan.size) host.setSignals(plan);
+        else waveNote.textContent = t('junction.greenWaveNone');
+      });
     });
     wave.dataset['action'] = 'greenWave';
     const waveNote = div('rp-note');
@@ -173,16 +177,13 @@ export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHo
   const list = div('rp-moves');
   const byLeg = new Map<SegmentId, { to: SegmentId; turn: string | null; blocked: boolean }[]>();
   const seen = new Set<string>();
-  const junctionTopo = sim.graph.junctions.get(node);
-  for (const id of junctionTopo?.connectors ?? []) {
-    const c = sim.connector(id);
-    if (!c) continue;
-    const key = movementKey(c.inSegment, c.outSegment);
+  for (const c of traffic?.moves ?? []) {
+    const key = movementKey(c.from, c.to);
     if (seen.has(key)) continue;
     seen.add(key);
-    const row = byLeg.get(c.inSegment) ?? [];
-    row.push({ to: c.outSegment, turn: c.turn, blocked: false });
-    byLeg.set(c.inSegment, row);
+    const row = byLeg.get(c.from) ?? [];
+    row.push({ to: c.to, turn: c.turn, blocked: false });
+    byLeg.set(c.from, row);
   }
   for (const key of n.blockedMovements) {
     if (seen.has(key)) continue;
@@ -204,15 +205,21 @@ export function mountJunctionPanel(container: HTMLElement, host: JunctionPanelHo
 }
 
 /** Rewrites the flows in place (the inspector's refresh), without rebuilding the panel. */
-export function refreshJunctionFlows(sim: SimWorld, doc: RoadDoc, node: NodeId): void {
+export function refreshJunctionFlows(traffic: JunctionTraffic | null | undefined, doc: RoadDoc, node: NodeId): void {
   if (!flowsShown?.isConnected) return;
   const n = doc.node(node);
   if (!n) return;
   // Each value by its own road: a leg the panel skipped
   for (const el of flowsShown.querySelectorAll<HTMLElement>('strong[data-segment]')) {
     const id = Number(el.dataset['segment']) as SegmentId;
-    if (n.incident.includes(id)) el.textContent = t('junction.perHour', { n: Math.round(sim.flow.rate(node, id)) });
+    if (n.incident.includes(id)) el.textContent = flowText(traffic, id);
   }
+}
+
+/** A leg's vehicles an hour, or a dash while the traffic's answer is on its way. */
+function flowText(traffic: JunctionTraffic | null | undefined, id: SegmentId): string {
+  const flow = traffic?.flows.find((f) => f.segment === id);
+  return flow ? t('junction.perHour', { n: Math.round(flow.perHour) }) : '—';
 }
 
 function moveChip(host: JunctionPanelHost, from: SegmentId, to: SegmentId, blocked: boolean, turn: string | null): HTMLButtonElement {

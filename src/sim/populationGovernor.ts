@@ -1,10 +1,6 @@
 /** THE POPULATION THE MACHINE SUSTAINS (CLAUDE.md: "no fixed population cap: the limit is what the machine sustains"). */
 import { FLEET_CEILING, PED_CEILING } from './params';
 
-/** A step costing more than this (ms, averaged) thins the town. */
-const HIGH_MS = 6.5;
-/** And less than this lets it fill again. */
-const LOW_MS = 3.5;
 /** Each change multiplies or divides the share by this. */
 const STEP = 0.85;
 /** The thinnest the town is made. */
@@ -20,8 +16,8 @@ export class PopulationGovernor {
   private changedAt = -Infinity;
   private shareNow: number;
 
-  /** `max`: the device's own share, the most the town is ever given. */
-  constructor(private max: number) {
+  /** `max`: the device's own share, the most the town is ever given; a step costing more than `highMs` (ms, averaged) thins the town, less than `lowMs` lets it fill again. */
+  constructor(private max: number, private readonly highMs = 6.5, private readonly lowMs = 3.5) {
     this.shareNow = max;
   }
 
@@ -53,8 +49,8 @@ export class PopulationGovernor {
     // The last cut has shown: the town is within the ceilings it set.
     const settled = vehicles <= FLEET_CEILING * this.shareNow && people <= PED_CEILING * this.shareNow;
     let next = this.shareNow;
-    if (this.mean > HIGH_MS && settled) next = Math.max(MIN_SHARE, this.shareNow * STEP);
-    else if (this.mean < LOW_MS) next = Math.min(this.max, this.shareNow / STEP);
+    if (this.mean > this.highMs && settled) next = Math.max(MIN_SHARE, this.shareNow * STEP);
+    else if (this.mean < this.lowMs) next = Math.min(this.max, this.shareNow / STEP);
     if (next !== this.shareNow) {
       this.shareNow = next;
       this.changedAt = seconds;

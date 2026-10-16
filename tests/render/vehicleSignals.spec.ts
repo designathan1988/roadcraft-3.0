@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { step } from '@sim/pipeline';
 import { DT } from '@sim/params';
-import { BLINK_HZ, MAX_STEER, WheelOdometer, blinkOn, indicatorSide, steerAngle } from '@render/vehicleSignals';
+import { BLINK_HZ, MAX_STEER, blinkOn, steerAngle } from '@render/vehicleSignals';
+import { WheelOdometer, indicatorSide, pathCurvature } from '@sim/vehicles/shown';
 import { LAYOUTS, layoutDoc, simOf } from '../sim/support/bodies';
 
 /** What a driver shows the road: which way they are about to go, and wheels that steer and roll. */
@@ -91,7 +92,7 @@ describe('vehicle signals', () => {
         const lane = sim.lanelet(v.lanelet);
         if (!lane) continue;
         const wheelbase = v.archetype.length * 0.62;
-        const steer = steerAngle(sim, v, wheelbase);
+        const steer = steerAngle(pathCurvature(sim, v), wheelbase);
         expect(Math.abs(steer)).toBeLessThanOrEqual(MAX_STEER);
         const middle = v.s > lane.length * 0.3 && v.s < lane.length * 0.7;
         if (lane.kind === 'connector' && middle && lane.turn === 'left') { lefts++; expect(steer).toBeGreaterThan(0); }

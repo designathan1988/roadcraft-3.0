@@ -1,12 +1,13 @@
 import type { NodeId, SegmentId } from '@world/ids';
-import type { LaneletGraph } from '@world/lanelets';
+import type { JunctionTraffic } from '@sim/inspect';
 import { type LaneLink, type NodeLanes, linkKey, toggleLaneLink } from '@world/roads/connectors';
 import { t } from '../i18n';
 import './roads.css';
 
 /** THE LANE CONNECTOR EDITOR of a junction, in the inspector */
 export interface ConnectorPanelHost {
-  readonly graph: () => LaneletGraph;
+  /** The junction as the traffic has it (`sim/inspect.ts`): undefined while the answer is on its way. */
+  readonly junction: () => JunctionTraffic | null | undefined;
   readonly links: () => readonly LaneLink[] | undefined;
   readonly set: (links: LaneLink[] | undefined) => void;
   /** World to screen, so the plan is turned as the player sees the junction (screen y down). */
@@ -18,24 +19,15 @@ interface Picked { readonly segment: SegmentId; readonly lane: number }
 let open: { node: NodeId; host: ConnectorPanelHost; root: HTMLElement; drawn: string } | null = null;
 let picked: { node: NodeId; lane: Picked } | null = null;
 
-/** What the node's lanes and built connections are, read from the lane graph. */
-export function nodeLanes(graph: LaneletGraph, node: NodeId): NodeLanes | null {
-  const junction = graph.junctions.get(node);
-  if (!junction) return null;
-  const lane = (id: string): Picked | null => {
-    const l = graph.lanelet(id);
-    return l && l.segment !== undefined ? { segment: l.segment, lane: l.laneIndex ?? 0 } : null;
-  };
-  const arriving = (graph.inbound.get(node) ?? []).map(lane).filter((x): x is Picked => x !== null);
-  const leaving = (graph.outbound.get(node) ?? []).map(lane).filter((x): x is Picked => x !== null);
-  const built: LaneLink[] = [];
-  for (const id of junction.connectors) {
-    const c = graph.connectors.get(id);
-    const a = c && lane(c.fromLane), b = c && lane(c.toLane);
-    if (a && b) built.push({ from: a.segment, fromLane: a.lane, to: b.segment, toLane: b.lane });
-  }
-  return { node, arriving, leaving, built };
+/** What the node's lanes and built connections are, as the traffic has them (`sim/inspect.ts` `junctionTraffic`). */
+export function nodeLanes(junction: JunctionTraffic | null | undefined, node: NodeId): NodeLanes | null {
+  if (!junction?.built) return null;
+  const pick = (e: { segment: SegmentId; lane: number }): Picked => ({ segment: e.segment, lane: e.lane });
+  return { node, arriving: junction.arriving.map(pick), leaving: junction.leaving.map(pick), built: junction.links };
 }
+
+/** A lane in the panel's stamp. */
+const laneKey = (l: Picked): string => `${l.segment}:${l.lane}`;
 
 export function mountConnectorPanel(container: HTMLElement, node: NodeId, host: ConnectorPanelHost): void {
   const root = document.createElement('section');
@@ -55,10 +47,10 @@ export function refreshConnectorPanel(): void {
 function draw(): void {
   if (!open) return;
   const { node, host, root } = open;
-  const graph = host.graph();
-  const lanes = nodeLanes(graph, node);
+  const junction = host.junction();
+  const lanes = nodeLanes(junction, node);
   const links = host.links();
-  const stamp = `${graph.revision}|${lanes ? lanes.built.map(linkKey).join(',') : '-'}|${links?.map(linkKey).join(',') ?? ''}|${picked ? `${picked.lane.segment}:${picked.lane.lane}` : ''}`;
+  const stamp = `${lanes ? `${lanes.arriving.map(laneKey).join(',')}>${lanes.leaving.map(laneKey).join(',')}>${lanes.built.map(linkKey).join(',')}` : '-'}|${links?.map(linkKey).join(',') ?? ''}|${picked ? `${picked.lane.segment}:${picked.lane.lane}` : ''}`;
   if (stamp === open.drawn) return;
   open.drawn = stamp;
   root.replaceChildren();
@@ -84,19 +76,13 @@ function draw(): void {
   const keyOf = (segment: SegmentId, lane: number, arriving: boolean): string => `${arriving ? 'a' : 'l'}${segment}:${lane}`;
   // In screen terms (y down): through the camera when the host gives it, else north up.
   const view = (p: { x: number; y: number }): { x: number; y: number } => host.project ? host.project(p.x, p.y) : { x: p.x, y: -p.y };
-  for (const id of graph.inbound.get(node) ?? []) {
-    const l = graph.lanelet(id);
-    if (!l || l.segment === undefined) continue;
-    const pts = l.centre.toPoints();
-    const p = view(pts[pts.length - 1]!), q = view(pts[Math.max(0, pts.length - 2)]!);
-    ends.set(keyOf(l.segment, l.laneIndex ?? 0, true), { x: p.x, y: p.y, dx: p.x - q.x, dy: p.y - q.y });
+  for (const e of junction?.arriving ?? []) {
+    const p = view(e), q = view({ x: e.nx, y: e.ny });
+    ends.set(keyOf(e.segment, e.lane, true), { x: p.x, y: p.y, dx: p.x - q.x, dy: p.y - q.y });
   }
-  for (const id of graph.outbound.get(node) ?? []) {
-    const l = graph.lanelet(id);
-    if (!l || l.segment === undefined) continue;
-    const pts = l.centre.toPoints();
-    const p = view(pts[0]!), q = view(pts[Math.min(pts.length - 1, 1)]!);
-    ends.set(keyOf(l.segment, l.laneIndex ?? 0, false), { x: p.x, y: p.y, dx: q.x - p.x, dy: q.y - p.y });
+  for (const e of junction?.leaving ?? []) {
+    const p = view(e), q = view({ x: e.nx, y: e.ny });
+    ends.set(keyOf(e.segment, e.lane, false), { x: p.x, y: p.y, dx: q.x - p.x, dy: q.y - p.y });
   }
   const all = [...ends.values()];
   const minX = Math.min(...all.map((e) => e.x)), maxX = Math.max(...all.map((e) => e.x));

@@ -1,14 +1,12 @@
 import { streetNameOf, streetNumbers } from '@world/roads/streetNames';
 import { PARKING_KINDS, parkingAllowed, type ParkingKind, type SegmentParking } from '@world/parking';
 import type { NodeId, SegmentId } from '@world/ids';
-import { laneletId } from '@world/lanelets';
 import { type JunctionControl, type NodeCrossingKind, type RoadDoc, type RoadEnd, type SegmentDirection } from '@world/doc';
 import type { Network } from '@world/network';
 import type { CurveShape } from '@core/bezier';
 import { LAST_UPGRADE_CLASS, ROAD_TYPES, roadProfile, travelLanes, type RoadType } from '@world/roadTypes';
 import { METERS_PER_UNIT, UNITS_PER_METER } from '@world/units';
-import type { SimWorld } from '@sim/world';
-import { signalStateFor } from '@sim/signals/query';
+import type { SimInspect } from '@sim/host';
 import { formatDecimal, language, plural, t } from './i18n';
 import { roadTypeName } from './labels';
 import { surfaceMode } from '@world/junction/build';
@@ -73,7 +71,7 @@ export interface InspectorActions {
 interface InspectorContext {
   readonly doc: RoadDoc;
   readonly net: Network;
-  readonly sim: SimWorld;
+  readonly sim: SimInspect;
   readonly selection: InspectorSelection;
   readonly actions: InspectorActions;
 }
@@ -87,7 +85,7 @@ let builtFor = '';
 export function openInspector(
   doc: RoadDoc,
   net: Network,
-  sim: SimWorld,
+  sim: SimInspect,
   selection: InspectorSelection,
   actions: InspectorActions,
 ): void {
@@ -108,8 +106,9 @@ function renderCurrent(): void {
 
   const { doc, net, sim, selection, actions } = current;
   // A junction's panel also follows the traffic's view of it: its signal comes or goes when the lane graph is rebuilt
+  const traffic = selection.node !== null ? sim.junction(selection.node) : undefined;
   const junctionState = selection.node !== null
-    ? `|${sim.topologyRevision}|${sim.graph.junctions.get(selection.node)?.signalised ? 1 : 0}|${sim.advisor.choice(selection.node) ?? ''}` : '';
+    ? `|${traffic ? `${traffic.built ? 1 : 0}${traffic.movements}` : '?'}|${traffic?.signalised ? 1 : 0}|${traffic?.autoChoice ?? ''}` : '';
   const key = `${selection.segment}|${selection.node}|${doc.revision}|${language()}${junctionState}`;
   const stats = document.getElementById('inspectStats');
 
@@ -123,7 +122,7 @@ function renderCurrent(): void {
     if (html === null) closeInspector();
     else if (stats.innerHTML !== html) stats.innerHTML = html;
     // The lane graph is rebuilt a moment after an edit: the connector editor follows it.
-    if (selection.node !== null) { refreshConnectorPanel(); refreshJunctionFlows(sim, doc, selection.node); }
+    if (selection.node !== null) { refreshConnectorPanel(); refreshJunctionFlows(traffic, doc, selection.node); }
     return;
   }
 
@@ -188,35 +187,14 @@ function parkingSelect(id: string, label: string, value: ParkingKind, rt: RoadTy
 }
 
 /** The live numbers for a road, or null when the road no longer exists. */
-function segmentStats(doc: RoadDoc, net: Network, sim: SimWorld, id: SegmentId): string | null {
+function segmentStats(doc: RoadDoc, net: Network, sim: SimInspect, id: SegmentId): string | null {
   const seg = doc.segment(id);
   if (!seg) return null;
   const rt = roadProfile(seg.type, seg.lanes, seg.direction, seg.section, seg.parking);
   const length = net.polylines.get(doc, id).length;
-
-  let occupancy = 0;
-  let queued = 0;
-  let speedSum = 0;
-  let speedCount = 0;
-  let capacity = 0;
-  // DO NOT walk `sim.graph.lanelets` here: this runs every refresh of the panel, and that map holds every lane of the city.
-  for (const [from, to] of [[seg.a, seg.b], [seg.b, seg.a]] as const) {
-    for (let k = 0; ; k++) {
-      const lane = sim.graph.lanelet(laneletId(id, from, to, k));
-      if (!lane) break;
-      capacity += Math.max(1, lane.length / 12);
-      const order = sim.runtime.get(lane.id)?.order;
-      if (!order) continue;
-      occupancy += order.length;
-      for (const vehicleId of order) {
-        const vehicle = sim.veh(vehicleId);
-        if (!vehicle) continue;
-        speedSum += vehicle.v;
-        speedCount++;
-        if (vehicle.v < 0.6) queued++;
-      }
-    }
-  }
+  // The traffic's numbers (`sim/inspect.ts`), a dash while they are on their way.
+  const traffic = sim.segment(id);
+  const known = (value: (tr: NonNullable<typeof traffic>) => string): string => (traffic ? value(traffic) : '—');
 
   return grid([
     [t('inspector.length'), `${meters(length)} m`],
@@ -224,18 +202,18 @@ function segmentStats(doc: RoadDoc, net: Network, sim: SimWorld, id: SegmentId):
       ? t('inspector.lanesTwoWay', { count: rt.lanes, perSide: travelLanes(rt, seg.direction) })
       : t('inspector.lanesOneWay', { count: rt.lanes })],
     [t('inspector.speed'), `${Math.round(rt.speedLimit * METERS_PER_UNIT * 3.6)} km/h`],
-    [t('inspector.meanSpeed'), speedCount ? `${Math.round((speedSum / speedCount) * METERS_PER_UNIT * 3.6)} km/h` : '—'],
-    [t('inspector.vehicles'), String(occupancy)],
-    [t('inspector.queue'), String(queued)],
-    [t('inspector.capacity'), t('inspector.capacityValue', { count: Math.round(capacity) })],
-    [t('inspector.volume'), String(sim.segmentVolume.get(id) ?? 0)],
+    [t('inspector.meanSpeed'), known((tr) => (tr.speedCount ? `${Math.round((tr.speedSum / tr.speedCount) * METERS_PER_UNIT * 3.6)} km/h` : '—'))],
+    [t('inspector.vehicles'), known((tr) => String(tr.occupancy))],
+    [t('inspector.queue'), known((tr) => String(tr.queued))],
+    [t('inspector.capacity'), known((tr) => t('inspector.capacityValue', { count: Math.round(tr.capacity) }))],
+    [t('inspector.volume'), known((tr) => String(tr.volume))],
   ]);
 }
 
 function renderSegment(
   doc: RoadDoc,
   net: Network,
-  sim: SimWorld,
+  sim: SimInspect,
   body: HTMLElement,
   id: SegmentId,
   actions: InspectorActions,
@@ -368,65 +346,43 @@ function renderSegment(
 }
 
 /** The live numbers for a junction, or null when the node no longer exists. */
-function nodeStats(doc: RoadDoc, sim: SimWorld, id: NodeId): string | null {
+function nodeStats(doc: RoadDoc, sim: SimInspect, id: NodeId): string | null {
   const node = doc.node(id);
   if (!node) return null;
-
-  const junction = sim.graph.junctions.get(id);
-  const controller = sim.controller(id);
-  const control = !junction
-    ? t('control.disconnected')
-    : junction.signalised
-      ? t('control.signal')
-      : t(`control.${node.control}`);
-  let active = 0;
-  let queued = 0;
-  let speedSum = 0;
-  let speedCount = 0;
-  let capacity = 0;
-  for (const laneId of junction?.inbound ?? []) {
-    const lane = sim.lanelet(laneId);
-    if (!lane) continue;
-    const runtime = sim.rt(laneId);
-    active += runtime.order.length;
-    capacity += Math.max(1, lane.length / 12);
-    for (const vehicleId of runtime.order) {
-      const vehicle = sim.veh(vehicleId);
-      if (!vehicle) continue;
-      speedSum += vehicle.v;
-      speedCount++;
-      if (vehicle.v < 0.6) queued++;
-    }
-  }
-  const volume = node.incident.reduce((total, segment) => total + (sim.segmentVolume.get(segment) ?? 0), 0);
+  // The traffic's numbers (`sim/inspect.ts`), a dash while they are on their way.
+  const traffic = sim.junction(id);
+  const known = (value: (tr: NonNullable<typeof traffic>) => string): string => (traffic ? value(traffic) : '—');
+  const control = !traffic
+    ? '—'
+    : !traffic.built
+      ? t('control.disconnected')
+      : traffic.signalised
+        ? t('control.signal')
+        : t(`control.${node.control}`);
 
   const rows: [string, string][] = [
     [t('inspector.control'), control],
     [t('inspector.connections'), String(node.incident.length)],
-    [t('inspector.movements'), String(junction?.connectors.length ?? 0)],
-    [t('inspector.vehicles'), String(active)],
-    [t('inspector.queue'), String(queued)],
-    [t('inspector.meanSpeed'), speedCount ? `${Math.round((speedSum / speedCount) * METERS_PER_UNIT * 3.6)} km/h` : '—'],
-    [t('inspector.capacity'), t('inspector.capacityValue', { count: Math.round(capacity) })],
-    [t('inspector.volume'), String(volume)],
+    [t('inspector.movements'), known((tr) => String(tr.movements))],
+    [t('inspector.vehicles'), known((tr) => String(tr.active))],
+    [t('inspector.queue'), known((tr) => String(tr.queued))],
+    [t('inspector.meanSpeed'), known((tr) => (tr.speedCount ? `${Math.round((tr.speedSum / tr.speedCount) * METERS_PER_UNIT * 3.6)} km/h` : '—'))],
+    [t('inspector.capacity'), known((tr) => t('inspector.capacityValue', { count: Math.round(tr.capacity) }))],
+    [t('inspector.volume'), known((tr) => String(tr.volume))],
   ];
 
-  if (controller && junction?.signalised) {
-    rows.push([t('inspector.cycle'), `${Math.round(controller.plan.cycle)} s`]);
-    rows.push([
-      t('inspector.phase'),
-      `${controller.stageIndex + 1}/${controller.plan.stages.length} · ${phaseLabel(controller.sub)}`,
-    ]);
+  const signal = traffic?.signal;
+  if (signal) {
+    rows.push([t('inspector.cycle'), `${Math.round(signal.cycle)} s`]);
+    rows.push([t('inspector.phase'), `${signal.stageIndex + 1}/${signal.stages} · ${phaseLabel(signal.sub as Parameters<typeof phaseLabel>[0])}`]);
   }
 
   // Each signal group as a lamp: the colour is read faster than the word
   let lamps = '';
   // Lamps only where there are lights: a stop or priority junction has none.
-  if (controller && junction?.signalised && junction.groups.length) {
-    lamps = `<div class="signal-chips">${junction.groups.map((g) => {
-      const state = signalStateFor(controller, g.id);
-      return `<span class="signal-chip" data-state="${state}"><i></i>${t('inspector.group', { id: g.id + 1 })} · ${signalLabel(state)}</span>`;
-    }).join('')}</div>`;
+  if (signal && signal.groups.length) {
+    lamps = `<div class="signal-chips">${signal.groups.map((g) =>
+      `<span class="signal-chip" data-state="${g.state}"><i></i>${t('inspector.group', { id: g.id + 1 })} · ${signalLabel(g.state)}</span>`).join('')}</div>`;
   }
   return grid(rows) + lamps;
 }
@@ -434,7 +390,7 @@ function nodeStats(doc: RoadDoc, sim: SimWorld, id: NodeId): string | null {
 function renderNode(
   doc: RoadDoc,
   net: Network,
-  sim: SimWorld,
+  sim: SimInspect,
   body: HTMLElement,
   id: NodeId,
 ): void {
@@ -451,8 +407,6 @@ function renderNode(
     mountJunctionPanel(body.querySelector<HTMLElement>('#inspectJunction')!, junctionHost(doc, sim, id));
     return;
   }
-  const junction = sim.graph.junctions.get(id);
-
   const mouths = node.incident
     .map((seg) => `${meters(net.mouthDistance(seg, id))} m`)
     .join(' · ');
@@ -478,11 +432,10 @@ function renderNode(
     '<div id="inspectJunction"></div>' + joinOffer +
     '<div id="inspectConnectors"></div>' + `<p class="inspect-note">${t('inspector.mouths')}: ${mouths || '—'}</p>`;
   mountJunctionPanel(body.querySelector<HTMLElement>('#inspectJunction')!, junctionHost(doc, sim, id));
-  void junction;
   const connectors = body.querySelector<HTMLElement>('#inspectConnectors');
   if (connectors && actionsForNode().onSetLaneLinks) {
     mountConnectorPanel(connectors, id, {
-      graph: () => sim.graph,
+      junction: () => sim.junction(id),
       links: () => doc.node(id)?.laneLinks,
       set: (links) => actionsForNode().onSetLaneLinks?.(id, links),
       ...(actionsForNode().project ? { project: actionsForNode().project! } : {}),
@@ -496,9 +449,11 @@ function renderNode(
 }
 
 /** What the junction panel changes, through the inspector's actions. */
-function junctionHost(doc: RoadDoc, sim: SimWorld, id: NodeId): Parameters<typeof mountJunctionPanel>[1] {
+function junctionHost(doc: RoadDoc, sim: SimInspect, id: NodeId): Parameters<typeof mountJunctionPanel>[1] {
   return {
-    doc, sim, node: id,
+    doc, node: id,
+    traffic: () => sim.junction(id),
+    greenWave: () => sim.greenWave(id),
     setHeight: (metres) => actionsForNode().onSetNodeHeight?.(id, metres),
     setControl: (control: JunctionControl) => actionsForNode().onSetControl?.(id, control),
     setRules: (rules) => actionsForNode().onSetApproachRules?.(id, rules),

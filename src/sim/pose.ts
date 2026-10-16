@@ -58,6 +58,21 @@ export function vehiclePoseInto(w: SimWorld, v: Vehicle, alpha: number, out: Pos
     out.angle = lerpAngle(free.pangle, free.angle, t);
     return true;
   }
+  if (!vehiclePoseEnds(w, v, ENDS)) return false;
+  blendPoseEnds(ENDS, t, out);
+  return true;
+}
+
+/** A vehicle's body at the last two ticks: centre, heading and lane-change yaw at each; `before` false when there is no last to blend from. */
+export interface PoseEnds {
+  x0: number; y0: number; h0: number; yaw0: number;
+  x1: number; y1: number; h1: number; yaw1: number;
+  before: boolean;
+}
+const ENDS: PoseEnds = { x0: 0, y0: 0, h0: 0, yaw0: 0, x1: 0, y1: 0, h1: 0, yaw1: 0, before: false };
+
+/** A vehicle on the road's two ends of the tick into `out` (`blendPoseEnds` makes its pose); false where it has none. */
+export function vehiclePoseEnds(w: SimWorld, v: Vehicle, out: PoseEnds): boolean {
   const frame = axleFrame(w, v, v, v.archetype.length, AXLE_NOW);
   if (!frame) return false;
 
@@ -65,26 +80,27 @@ export function vehiclePoseInto(w: SimWorld, v: Vehicle, alpha: number, out: Pos
   const side = bodyOffset(v, v.archetype.length) + cycleShift(v, w.lanelet(v.lanelet), v.s);
   // Along the frame's left normal (`perp` of its tangent).
   const atX = frame.p.x - frame.t.y * side, atY = frame.p.y + frame.t.x * side;
-  const heading = Math.atan2(frame.t.y, frame.t.x);
-  out.p.x = atX; out.p.y = atY; out.angle = heading;
+  out.x1 = atX; out.y1 = atY; out.h1 = Math.atan2(frame.t.y, frame.t.x); out.yaw1 = laneChangeYaw(v.lateralSlope);
+  out.before = false;
 
   const before = axleFrame(w, v, v.prev, v.archetype.length, AXLE_BEFORE);
   if (!before) return true;
   const sideBefore = bodyOffset(v.prev, v.archetype.length) + cycleShift(v, w.lanelet(v.prev.lanelet), v.prev.s);
-  BEFORE_OWN.x = before.p.x - before.t.y * sideBefore; BEFORE_OWN.y = before.p.y + before.t.x * sideBefore;
-  const beforeAt = BEFORE_OWN;
-  const beforeAhead = before.t;
-  if (Math.hypot(beforeAt.x - atX, beforeAt.y - atY) > POSE_JUMP_LIMIT) return true;
-
-  // Point into the change, blended across the tick like everything else.
-  const yaw = lerp(laneChangeYaw(v.prev.lateralSlope), laneChangeYaw(v.lateralSlope), t);
-  out.p.x = lerp(beforeAt.x, atX, t); out.p.y = lerp(beforeAt.y, atY, t);
-  out.angle = lerpAngle(Math.atan2(beforeAhead.y, beforeAhead.x), heading, t) + yaw;
+  const bx = before.p.x - before.t.y * sideBefore, by = before.p.y + before.t.x * sideBefore;
+  if (Math.hypot(bx - atX, by - atY) > POSE_JUMP_LIMIT) return true;
+  out.x0 = bx; out.y0 = by; out.h0 = Math.atan2(before.t.y, before.t.x); out.yaw0 = laneChangeYaw(v.prev.lateralSlope);
+  out.before = true;
   return true;
 }
 
-/** The last step's body centre on its own chart, written in place. */
-const BEFORE_OWN = { x: 0, y: 0 };
+/** The pose `t` of the way through a tick, from its two ends: the last tick's alone when there is none to blend from */
+export function blendPoseEnds(e: Readonly<PoseEnds>, t: number, out: PoseOut): void {
+  if (!e.before) { out.p.x = e.x1; out.p.y = e.y1; out.angle = e.h1; return; }
+  // Point into the change, blended across the tick like everything else.
+  const yaw = lerp(e.yaw0, e.yaw1, t);
+  out.p.x = lerp(e.x0, e.x1, t); out.p.y = lerp(e.y0, e.y1, t);
+  out.angle = lerpAngle(e.h0, e.h1, t) + yaw;
+}
 
 /** `vehiclePoseNow` into `out`; false where there is none (the walkers read every vehicle's every tick). */
 export function vehiclePoseNowInto(w: SimWorld, v: Vehicle, out: PoseOut): boolean {
