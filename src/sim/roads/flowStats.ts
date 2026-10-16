@@ -19,6 +19,7 @@ export class FlowStats {
   measured = 0;
 
   record(node: NodeId, from: SegmentId): void {
+    this.counted.add(node);
     let legs = this.counts.get(node);
     if (!legs) this.counts.set(node, legs = new Map());
     legs.set(from, (legs.get(from) ?? 0) + 1);
@@ -45,6 +46,14 @@ export class FlowStats {
       this.counts.clear();
     }
   }
+
+  /** The junctions counted at since this was last asked: those whose rates went up (`ControlAdvisor.watch`). */
+  takeCounted(): Set<NodeId> {
+    const out = this.counted;
+    this.counted = new Set();
+    return out;
+  }
+  private counted = new Set<NodeId>();
 
   /** Vehicles an hour entering `node` from `seg`, as a trend. */
   rate(node: NodeId, seg: SegmentId): number {

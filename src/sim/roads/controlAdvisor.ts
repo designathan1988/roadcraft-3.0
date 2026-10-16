@@ -53,10 +53,55 @@ export class ControlAdvisor {
 
   forget(nodes: ReadonlySet<NodeId>): void {
     for (const node of [...this.choices.keys()]) if (!nodes.has(node)) { this.choices.delete(node); this.changedAt.delete(node); }
+    this.watched = null;
+    this.due.clear();
   }
 
   /** These junctions' choices forgotten (gone with an edit). */
   drop(nodes: ReadonlySet<NodeId>): void {
-    for (const node of nodes) { this.choices.delete(node); this.changedAt.delete(node); }
+    for (const node of nodes) { this.choices.delete(node); this.changedAt.delete(node); this.watched?.delete(node); }
+  }
+
+  /** DO NOT evaluate every junction of the map every 10 s */
+  private watched: Set<NodeId> | null = null;
+
+  /** A junction to evaluate again: traffic counted at it, or an edit built it again. */
+  watch(node: NodeId): void {
+    this.watched?.add(node);
+  }
+
+  /** The junctions out of the evaluations until their trend window ends, by that time (`waits`): a list per evaluation at most. */
+  private readonly due = new Map<number, NodeId[]>();
+
+  /** The junctions to evaluate at `now`, in no set order; `all`: the town's, read when every one is asked. */
+  asked(now: number, all: () => Iterable<NodeId>): NodeId[] {
+    this.watched ??= new Set(all());
+    for (const [time, nodes] of this.due) {
+      if (time > now) continue;
+      for (const node of nodes) this.watched.add(node);
+      this.due.delete(time);
+    }
+    return [...this.watched];
+  }
+
+  /** Whether a junction's window keeps any evaluation from changing it now: seen (`evaluate`), and left out until the window ends. */
+  waits(node: NodeId, initial: AutoControl, now: number): boolean {
+    if (!this.choices.has(node)) this.choices.set(node, initial);
+    const due = Math.max(F.trendWindow, (this.changedAt.get(node) ?? -Infinity) + F.trendWindow);
+    if (now >= due) return false;
+    this.watched?.delete(node);
+    const list = this.due.get(due);
+    if (list) list.push(node); else this.due.set(due, [node]);
+    return true;
+  }
+
+  /** A junction left out of the evaluations until it is watched again (not on "automatic", gone). */
+  unwatch(node: NodeId): void {
+    this.watched?.delete(node);
+  }
+
+  /** Out of the evaluations if, evaluated past its window and settled on 'priority', no evaluation can change it */
+  settle(node: NodeId): void {
+    if (this.choices.get(node) === 'priority') this.watched?.delete(node);
   }
 }

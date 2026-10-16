@@ -634,6 +634,7 @@ export class SimWorld {
     } else {
       const gone = new Set([...changed.junctions].filter((node) => !this.graph.junctions.has(node)));
       if (gone.size) { this.flow.drop(gone); this.advisor.drop(gone); }
+      for (const node of changed.junctions) if (!gone.has(node)) this.advisor.watch(node);
     }
     // DO NOT forget the log here: every road drawn anywhere had every junction's posts and heads placed again.
     this.noteJunctionsReached();
@@ -709,10 +710,17 @@ export class SimWorld {
   stepControlAdvisor(dt: number): void {
     this.flow.step(dt);
     if (!this.advisor.tick(dt)) return;
-    let changed = false;
-    for (const [node, junction] of this.graph.junctions) {
+    for (const node of this.flow.takeCounted()) this.advisor.watch(node);
+    const switched: NodeId[] = [];
+    // The junctions counted at since, built again, or not settled: `ControlAdvisor.watch`, `settle`.
+    const now = this.flow.measured;
+    for (const node of this.advisor.asked(now, () => this.graph.junctions.keys())) {
+      const junction = this.graph.junctions.get(node);
       const n = this.doc.node(node);
-      if (!n || n.control !== 'auto' || n.incident.length < 3) continue;
+      if (!junction || !n || n.control !== 'auto' || n.incident.length < 3) { this.advisor.unwatch(node); continue; }
+      const initial: AutoControl = junction.signalised ? 'signal' : 'priority';
+      // Inside its trend window no flow changes it: not measured, left out until the window ends.
+      if (this.advisor.waits(node, initial, now)) continue;
       const main = mainRoadLegs(this.doc, node);
       let major = 0, minorMax = 0, minorTotal = 0;
       for (const seg of n.incident) {
@@ -720,10 +728,12 @@ export class SimWorld {
         if (main?.includes(seg)) major += rate;
         else { minorMax = Math.max(minorMax, rate); minorTotal += rate; }
       }
-      const initial: AutoControl = junction.signalised ? 'signal' : 'priority';
-      changed = this.advisor.evaluate(node, major, minorMax, minorTotal, initial, this.flow.measured) || changed;
+      if (this.advisor.evaluate(node, major, minorMax, minorTotal, initial, now)) switched.push(node);
+      else this.advisor.settle(node);
     }
-    if (changed && this.applyAutoControl()) this.syncControllers();
+    if (!switched.length) return;
+    switched.sort((a, b) => a - b);
+    if (this.applyAutoControl(switched)) this.syncControllers(new Set(switched));
   }
 
   /** The second half: the footway graph and its crossings, and the controllers again */
