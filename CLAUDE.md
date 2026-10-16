@@ -116,11 +116,14 @@ GPU memory and drawing
 - Needs shots: signature buildings without a far level (`massing.ts` `emitMassing`, few per city).
 
 Main thread
-- The simulation's worker (`sim.worker.ts`) keeps a whole copy of every building record
-  (`world/replica.ts`): the agents read few of their fields. Fix: a record of what the sim reads.
+- The simulation's and the growth's workers each keep a whole copy of every building record
+  (`world/replica.ts`, ~7.45 KB a record: +560 MB each at 80,000 buildings). Fix: a sim-side and a
+  growth-side record (frame, use, footprint, the element kinds read, bounds made on the page), the
+  world readers narrowed to `Pick<>` types, checked identical on both sides.
 - The page still rebuilds the network for drawing, and the worker its own from the replica.
-- City growth is sliced on the page (`main.ts` `growCity`, `GROW_SLICE_MS`; `growZones`):
-  amortization; ~2.5 ms a building, flat profile. Fix: a growth worker on a diary-fed copy.
+- A generated city's layout (`layoutSteps`: `planLotsSteps`, `greenCitySteps`, `zoneCity`, ~2 s on a
+  medium city) is still sliced on the page; the buildings grow in `growth.worker.ts`.
+- `LorryTraffic.plan` is sliced per tick (`PLAN_BUDGET`, ~1.1 ms a tick): amortization.
 - The lot proposal is a whole-map plan spread across frames (`planLotsSteps`).
 - 13 global-revision reads left in `renderer.ts` (the world-rebuild trigger and `gradedFor`).
 - Shaders are compiled at each map load from one walk of the scene (`renderer.ts`); watch for a
@@ -136,9 +139,9 @@ O(map) per edit
   their autosave section whole. Fix: ids on list items (a save format change).
 - Terrain: the water is rebuilt for the whole plate at a stroke's end; its ground texture is sent
   whole (r186 partial uploads are RGBA only); a light request copies the plate's heights.
-- Simulation: control advisor every 10 s (`controlAdvisor.ts:37`); all stops scanned
-  (`transit/transit.ts:268`); `trainZones` built each tick (`walk.ts:1952`).
-- Fleet copied or scanned per tick in `lotTraffic.ts:156, 269, 309`, `lorryTraffic.ts:136, 247`.
+- Simulation: an edit still checks every vehicle's membership cheaply (a lane -> vehicle index would
+  end it); a road change wakes every sleeping signal; the lot car draw and the lorry yards are
+  town-wide every 1-2 s (a weighted sampler would change the draws).
 - The rigged crowd blends palettes on the CPU (`riggedCitizens.ts` `emit`): only the scenery's few
   bodies and `?bodies=cooked`; the default crowd (`proceduralCrowd.ts`) is on the GPU.
 - Files of 3,500-4,500 lines (`main.ts`, `renderer.ts`, `buildingMesh.ts`).
