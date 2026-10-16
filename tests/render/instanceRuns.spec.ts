@@ -10,6 +10,7 @@ import {
   Sphere,
   type BufferAttribute,
   type Camera,
+  Vector3,
 } from 'three';
 import { Rng } from '@core/rng';
 import { RunBuilder, createInstanceRuns, type Run, type RunStore } from '@render/instanceRuns';
@@ -197,6 +198,49 @@ describe('instances kept thing by thing', () => {
     expect(drawn()).toBeGreaterThan(near);
     look(0, 0, m(300));
     expect(room()).toBeLessThanOrEqual(Math.max(near * 2, 64 * specs.length * 2));
+    layer.dispose();
+  });
+
+  it('leaves out, with a cut by size, what spans under the least pixels, and only that', () => {
+    const rng = new Rng(17);
+    const seen = m(0.3), width = 1600, least = 0.5;
+    const thin: RunStore[] = specs.map((spec) => ({ ...spec, seen }));
+    const layer = createInstanceRuns('test', thin, 0, { least, width: () => width });
+    const placed: { x: number; y: number; z: number; r: number; row: string }[] = [];
+    const runs: Run[] = [];
+    const object = new Object3D();
+    for (let k = 0; k < 2000; k++) {
+      const builder = new RunBuilder(thin);
+      object.position.set((rng.float() - 0.5) * m(4000), 0, (rng.float() - 0.5) * m(4000));
+      object.updateMatrix();
+      builder.add(0, object.matrix.elements, 1);
+      runs.push(builder.build());
+      const sphere = geometry.boundingSphere!.clone().applyMatrix4(object.matrix);
+      placed.push({ x: sphere.center.x, y: sphere.center.y, z: sphere.center.z, r: sphere.radius, row: Array.from(object.matrix.elements, (v) => Math.fround(v)).join(',') });
+    }
+    layer.update({ added: runs, removed: [] });
+    const camera = new PerspectiveCamera(60, 1.6, 0.5, m(20000));
+    camera.position.set(0, m(30), 0);
+    camera.lookAt(m(100), 0, -m(100));
+    camera.updateMatrixWorld();
+    const view = new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const frustum = new Frustum().setFromProjectionMatrix(view);
+    layer.cull(frustum, view);
+    const mesh = layer.meshes.find((x) => x.name === 'plain')!;
+    const drawn = new Set<string>();
+    for (let i = 0; i < mesh.count; i++) drawn.add(Array.from((mesh.instanceMatrix.array as Float32Array).subarray(i * 16, i * 16 + 16)).join(','));
+    // Pixels across at clip w: seen x (P00 / w) x width / 2.
+    const p00 = camera.projectionMatrix.elements[0]!;
+    let cut = 0, kept = 0;
+    for (const t of placed) {
+      if (!frustum.intersectsSphere(new Sphere(new Vector3(t.x, t.y, t.z), t.r))) continue;
+      const depth = new Vector3(t.x, t.y, t.z).applyMatrix4(camera.matrixWorldInverse).z * -1;
+      const nearest = Math.max(1e-6, depth - t.r), farthest = depth + t.r;
+      if (seen * p00 / nearest * width / 2 >= least) { expect(drawn.has(t.row)).toBe(true); kept++; }
+      if (seen * p00 / farthest * width / 2 < least * 0.99 && depth - t.r > 0) { if (seen * p00 / nearest * width / 2 < least) { expect(drawn.has(t.row)).toBe(false); cut++; } }
+    }
+    expect(kept).toBeGreaterThan(5);
+    expect(cut).toBeGreaterThan(5);
     layer.dispose();
   });
 });

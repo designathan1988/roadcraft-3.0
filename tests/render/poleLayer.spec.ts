@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { InstancedBufferGeometry, InstancedMesh, InterleavedBufferAttribute, Mesh } from 'three';
+import { Frustum, type InstancedBufferGeometry, type InstancedMesh, type InterleavedBufferAttribute, Matrix4, type Mesh, OrthographicCamera } from 'three';
 import { Network } from '@world/network';
 import { applyLots, planLots } from '@world/lots';
 import { DEFAULT_CITY, planCity } from '@world/cityGen/plan';
@@ -14,6 +14,13 @@ import { m } from '@world/units';
 
 /** Each mesh's drawn instances as sorted rows, and the wires' instances likewise: the picture, whatever the slots. */
 function picture(layer: PoleLayer): Map<string, string[]> {
+  // Culled by a view of the whole town: every part is drawn (no cut by size without a width).
+  const camera = new OrthographicCamera(-m(50000), m(50000), m(50000), -m(50000), 1, m(100000));
+  camera.position.set(0, m(50000), 0);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld();
+  const view = new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  layer.cull(new Frustum().setFromProjectionMatrix(view), view);
   const out = new Map<string, string[]>();
   layer.group.traverse((o) => {
     const mesh = o as InstancedMesh;

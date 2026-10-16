@@ -32,6 +32,14 @@ export interface RunStore {
   readonly tinted: boolean;
   /** Leaf cards: left out at the map zoom (`setMap`). */
   readonly cards: boolean;
+  /** Its size as seen, world units (a thin part's thickness): left out where it covers less than the layer's `pixels.least`. */
+  readonly seen?: number;
+}
+
+/** A layer's cut by size on the screen: the view's width in pixels, and the least an instance must span to be drawn. */
+export interface PixelCut {
+  readonly least: number;
+  readonly width: () => number;
 }
 
 /** A thing's instances in one store: matrices (three's column order), tints (tinted stores) and each one's largest scale. */
@@ -190,7 +198,7 @@ export function warmMeshes(specs: readonly RunStore[]): InstancedMesh[] {
 }
 
 /** The layer over these stores. */
-export function createInstanceRuns(name: string, specs: readonly RunStore[], margin: number): InstanceRuns {
+export function createInstanceRuns(name: string, specs: readonly RunStore[], margin: number, pixels: PixelCut | null = null): InstanceRuns {
   const group = new Group();
   group.name = name;
   const stores: Store[] = specs.map((spec, index) => {
@@ -341,6 +349,10 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
   const drawnNow = (s: Store): boolean => !(s.spec.cards && mapMode === true);
   const probe = new Sphere();
   let cullFrustum: Frustum | null = null;
+  /** The view's fourth row (x, y, z, w) and its length over x, y, z: a point's clip w, less a sphere's radius (`visit`). */
+  const depthRow = new Float64Array(5);
+  /** Size over clip w under which an instance spans less than `pixels.least` (0: no cut). */
+  let cutBelow = 0;
   /** The node and what it holds against the planes of `mask` still unsettled for it */
   const visit = (node: CellNode, mask: number): void => {
     if (node.r < 0) return;
@@ -362,6 +374,7 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
       let target = s.mesh!.instanceMatrix.array as Float32Array;
       let tints = s.spec.tinted ? s.mesh!.instanceColor!.array as Float32Array : null;
       let n = s.drawn;
+      const seen = cutBelow > 0 ? s.spec.seen ?? 0 : 0;
       for (const i of slots) {
         const r = sp[i * 4 + 3]!;
         if (r === -Infinity) continue;
@@ -370,6 +383,11 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
           probe.center.set(sp[i * 4]!, sp[i * 4 + 1]!, sp[i * 4 + 2]!);
           probe.radius = r + margin;
           if (!cullFrustum!.intersectsSphere(probe)) continue;
+        }
+        if (seen > 0) {
+          // Its size on the screen where its sphere is nearest: the clip w is the depth in a perspective, 1 in an orthographic view.
+          const w = depthRow[0]! * sp[i * 4]! + depthRow[1]! * sp[i * 4 + 1]! + depthRow[2]! * sp[i * 4 + 2]! + depthRow[3]! - r * depthRow[4]!;
+          if (w > 0 && seen / w < cutBelow) continue;
         }
         // More in view than the mesh has room for: twice the room.
         if (n === shown.length) {
@@ -458,6 +476,10 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
       }
     },
     cull(frustum, view) {
+      const e = view.elements;
+      depthRow[0] = e[3]!; depthRow[1] = e[7]!; depthRow[2] = e[11]!; depthRow[3] = e[15]!; depthRow[4] = Math.hypot(e[3]!, e[7]!, e[11]!);
+      // NDC half-width spans a world unit at clip w = 1 times the length of the view's first row; a pixel is 2 / width of NDC.
+      cutBelow = pixels ? pixels.least * 2 / (Math.max(1, pixels.width()) * Math.hypot(e[0]!, e[4]!, e[8]!)) : 0;
       if (!culledFor || !culledFor.equals(view)) {
         culledFor = (culledFor ?? new Matrix4()).copy(view);
         for (const s of stores) s.current = false;

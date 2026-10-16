@@ -15,6 +15,8 @@ import {
   CanvasTexture,
   SRGBColorSpace,
   RepeatWrapping,
+  type Frustum,
+  type Matrix4,
 } from 'three';
 
 import type { Network } from '@world/network';
@@ -52,6 +54,7 @@ const BRACE_DROP = m(0.55);
 const BRACE_THICK = m(0.05);
 /** Pole-top transformer can. */
 const CAN_RADIUS = m(0.28);
+const CAN_TALL = m(0.95);
 /** Rise of the lamp bracket from the pole to the head. */
 const LAMP_TILT = (8 * Math.PI) / 180;
 /** How far a wire swings at mid-span in a full gust. */
@@ -65,6 +68,8 @@ import type { UtilityPole, UtilitySpan } from '@world/utilities';
 export interface Utilities {
   readonly group: Group;
   readonly triangles: number;
+  /** Keeps the parts the camera can see, and big enough to see (`instanceRuns.ts`): nothing is drawn before the first cull. */
+  cull(frustum: Frustum, view: Matrix4): void;
   dispose(): void;
 }
 
@@ -95,25 +100,27 @@ export interface PolePartSpec {
   readonly castShadow: boolean;
   readonly receiveShadow: boolean;
   readonly renderOrder: number;
+  /** Its size as seen, metres: the thickness of a thin part, the largest side of a compact one (`RunStore.seen`). */
+  readonly seen: number;
 }
 
 /** The parts in `POLE_PART` order: the catalogue's shapes and materials, the lamps' light from the scenery's kit. */
 export function polePartSpecs(kit: SceneryKit): readonly PolePartSpec[] {
   const { metal, timber, housing, porcelain, steel, mastGeometry, capGeometry, insulatorGeometry, canGeometry, boxGeometry, lensGeometry } = PARTS;
-  const solid = (name: string, geometry: BufferGeometry, material: Material): PolePartSpec =>
-    ({ name, geometry, material, castShadow: true, receiveShadow: true, renderOrder: 0 });
+  const solid = (name: string, geometry: BufferGeometry, material: Material, seen: number): PolePartSpec =>
+    ({ name, geometry, material, castShadow: true, receiveShadow: true, renderOrder: 0, seen });
   return [
-    solid('utility-poles', mastGeometry, timber),
-    solid('utility-arms', boxGeometry, timber),
-    solid('utility-caps', capGeometry, steel),
-    solid('utility-braces', boxGeometry, steel),
-    solid('utility-insulators', insulatorGeometry, porcelain),
-    solid('utility-transformers', canGeometry, steel),
-    solid('utility-lamp-arms', boxGeometry, metal),
-    solid('utility-lamp-heads', boxGeometry, housing),
-    { name: 'utility-lamp-lenses', geometry: lensGeometry, material: kit.glow, castShadow: false, receiveShadow: true, renderOrder: 0 },
-    { name: 'utility-lamp-pools', geometry: kit.pool, material: kit.poolGlow, castShadow: false, receiveShadow: false, renderOrder: 3 },
-    { name: 'utility-lamp-beams', geometry: kit.beam, material: kit.beamGlow, castShadow: false, receiveShadow: false, renderOrder: 4 },
+    solid('utility-poles', mastGeometry, timber, POLE_TOP_RADIUS * 2),
+    solid('utility-arms', boxGeometry, timber, POLE_ARM_THICK),
+    solid('utility-caps', capGeometry, steel, POLE_TOP_RADIUS * 2.3),
+    solid('utility-braces', boxGeometry, steel, BRACE_THICK),
+    solid('utility-insulators', insulatorGeometry, porcelain, INSULATOR_TALL),
+    solid('utility-transformers', canGeometry, steel, CAN_TALL),
+    solid('utility-lamp-arms', boxGeometry, metal, POLE_ARM_THICK * 0.8),
+    solid('utility-lamp-heads', boxGeometry, housing, POLE_LAMP_LONG),
+    { name: 'utility-lamp-lenses', geometry: lensGeometry, material: kit.glow, castShadow: false, receiveShadow: true, renderOrder: 0, seen: POLE_LAMP_LONG * 0.8 },
+    { name: 'utility-lamp-pools', geometry: kit.pool, material: kit.poolGlow, castShadow: false, receiveShadow: false, renderOrder: 3, seen: LAMP_POOL_RADIUS * 2 },
+    { name: 'utility-lamp-beams', geometry: kit.beam, material: kit.beamGlow, castShadow: false, receiveShadow: false, renderOrder: 4, seen: LAMP_BEAM_RADIUS * 2 },
   ];
 }
 
@@ -382,7 +389,7 @@ function madeUtilityParts(): UtilityParts {
     mastGeometry: new CylinderGeometry(POLE_TOP_RADIUS, POLE_BASE_RADIUS, POLE_HEIGHT, 12),
     capGeometry: new CylinderGeometry(POLE_TOP_RADIUS * 0.4, POLE_TOP_RADIUS * 1.15, m(0.08), 10),
     insulatorGeometry: new CylinderGeometry(INSULATOR_RADIUS * 0.55, INSULATOR_RADIUS, INSULATOR_TALL, 10),
-    canGeometry: new CylinderGeometry(CAN_RADIUS, CAN_RADIUS, m(0.95), 14),
+    canGeometry: new CylinderGeometry(CAN_RADIUS, CAN_RADIUS, CAN_TALL, 14),
     boxGeometry: new BoxGeometry(1, 1, 1),
     // One face, looking down: a lens only shines down (see `lampLensGeometry`).
     lensGeometry: new PlaneGeometry(1, 1).rotateX(Math.PI / 2),

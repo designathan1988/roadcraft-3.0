@@ -1,9 +1,11 @@
 import {
+  type Frustum,
   Group,
   InstancedBufferGeometry,
   InstancedInterleavedBuffer,
-  InstancedMesh,
+  type InstancedMesh,
   InterleavedBufferAttribute,
+  type Matrix4,
   Mesh,
   Sphere,
   Vector3,
@@ -17,11 +19,11 @@ import { PoleIndex } from '@world/poleIndex';
 import { kerbward } from '@world/poleLines';
 import { m } from '@world/units';
 import { POLE_HEIGHT, type PoleArms, poleArmsAt, type UtilityPole, type UtilitySpan } from '@world/utilities';
-import type { SceneryKit } from './scenery';
+import { type InstanceRuns, type PixelCut, type Run, RunBuilder, type RunStore, createInstanceRuns, warmMeshes } from './instanceRuns';
+import { SHADOW_REACH, type SceneryKit } from './scenery';
 import {
   POLE_PART_COUNT,
   type Placement,
-  type PolePartSpec,
   SPAN_WIRES,
   type Utilities,
   WIRE_HALF_WIDTH,
@@ -58,114 +60,17 @@ interface PoleState {
   readonly top: number;
   readonly kerb: { x: number; y: number } | null;
   readonly frame: PoleArms;
-  /** Its slots in each part's mesh (`POLE_PART`). */
-  readonly slots: number[][];
+  /** Its parts as instances (`instanceRuns.ts`): taken away by the same object; null for a pole only tied into. */
+  readonly run: Run | null;
 }
 
-/** One part's instances: a mesh with room for `capacity`, the first `count` drawn, and which pole holds each slot. */
-class PartStore {
-  private mesh: InstancedMesh | null = null;
-  private capacity = 0;
-  count = 0;
-  private readonly owner: PoleId[] = [];
-  private readonly written: number[] = [];
-  private whole = false;
-  private readonly box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
-  private scale = 0;
-  private boundsMoved = false;
-  readonly perInstance: number;
-
-  constructor(private readonly spec: PolePartSpec, private readonly group: Group) {
-    const index = spec.geometry.index;
-    this.perInstance = (index ? index.count : spec.geometry.getAttribute('position').count) / 3;
-  }
-
-  /** Room for `needed` instances: a mesh at least twice as large when it is full, the drawn ones copied over. */
-  reserve(needed: number): void {
-    if (needed <= this.capacity) return;
-    const capacity = Math.max(needed, this.capacity * 2, 16);
-    const mesh = new InstancedMesh(this.spec.geometry, this.spec.material, capacity);
-    mesh.name = this.spec.name;
-    mesh.castShadow = this.spec.castShadow;
-    mesh.receiveShadow = this.spec.receiveShadow;
-    mesh.renderOrder = this.spec.renderOrder;
-    if (this.mesh) {
-      (mesh.instanceMatrix.array as Float32Array).set((this.mesh.instanceMatrix.array as Float32Array).subarray(0, this.count * 16));
-      mesh.boundingSphere = this.mesh.boundingSphere;
-      this.group.remove(this.mesh);
-      // Its buffer let go on the GPU (`WebGLObjects` on the mesh's dispose).
-      this.mesh.dispose();
-    }
-    this.group.add(mesh);
-    this.mesh = mesh;
-    this.capacity = capacity;
-    this.whole = true;
-  }
-
-  /** A part placed for a pole: its slot. */
-  add(pole: PoleId, placement: Placement): number {
-    this.reserve(this.count + 1);
-    const slot = this.count++;
-    this.owner[slot] = pole;
-    this.write(slot, placement);
-    return slot;
-  }
-
-  private write(slot: number, placement: Placement): void {
-    writePlacement(placement, this.mesh!.instanceMatrix.array as Float32Array, slot * 16);
-    if (!this.whole) this.written.push(slot);
-    const b = this.box;
-    const x = placement.x, y = placement.z, z = -placement.y;
-    if (x < b[0]! || y < b[1]! || z < b[2]! || x > b[3]! || y > b[4]! || z > b[5]!) {
-      b[0] = Math.min(b[0]!, x); b[1] = Math.min(b[1]!, y); b[2] = Math.min(b[2]!, z);
-      b[3] = Math.max(b[3]!, x); b[4] = Math.max(b[4]!, y); b[5] = Math.max(b[5]!, z);
-      this.boundsMoved = true;
-    }
-    const s = Math.max(Math.abs(placement.sx), Math.abs(placement.sy), Math.abs(placement.sz));
-    if (s > this.scale) { this.scale = s; this.boundsMoved = true; }
-  }
-
-  /** A slot let go: the last part moves into it. Returns the pole whose slot `count` became `slot`, if another moved. */
-  remove(slot: number): PoleId | null {
-    const last = --this.count;
-    if (slot === last) return null;
-    const array = this.mesh!.instanceMatrix.array as Float32Array;
-    array.copyWithin(slot * 16, last * 16, last * 16 + 16);
-    const moved = this.owner[last]!;
-    this.owner[slot] = moved;
-    if (!this.whole) this.written.push(slot);
-    return moved;
-  }
-
-  /** The drawn count, and the slots written sent to the GPU. */
-  flush(): void {
-    const mesh = this.mesh;
-    if (!mesh) return;
-    mesh.count = this.count;
-    mesh.visible = this.count > 0;
-    const matrices = mesh.instanceMatrix;
-    if (this.whole || this.written.length * 2 > this.count) {
-      matrices.clearUpdateRanges();
-      matrices.needsUpdate = true;
-    } else if (this.written.length) {
-      for (const slot of this.written) if (slot < this.count) matrices.addUpdateRange(slot * 16, 16);
-      matrices.needsUpdate = true;
-    }
-    this.written.length = 0;
-    this.whole = false;
-    if (this.boundsMoved && this.count > 0) {
-      // The part's own bounds, computed when its shape was made (`makeUtilityParts`, `createSceneryKit`).
-      const b = this.box, part = this.spec.geometry.boundingSphere!;
-      const centre = new Vector3((b[0]! + b[3]!) / 2, (b[1]! + b[4]!) / 2, (b[2]! + b[5]!) / 2);
-      mesh.boundingSphere = new Sphere(centre, Math.hypot(b[3]! - b[0]!, b[4]! - b[1]!, b[5]! - b[2]!) / 2 + (part.center.length() + part.radius) * this.scale);
-      this.boundsMoved = false;
-    }
-  }
-
-  dispose(): void {
-    this.mesh?.dispose();
-  }
-}
+/** The parts' stores as the instance layer keeps them: one mesh a part, culled and cut by size on the screen. */
+const partStores = (kit: SceneryKit): RunStore[] => polePartSpecs(kit).map((spec) => ({
+  name: spec.name, geometry: spec.geometry, material: spec.material, castShadow: spec.castShadow, receiveShadow: spec.receiveShadow,
+  renderOrder: spec.renderOrder, tinted: false, cards: false, seen: spec.seen,
+}));
+/** Under half a pixel across, a part is not drawn (the poles' far level). */
+const SEEN_PIXELS = 0.5;
 
 /** Every span's wires: one tube template, `SPAN_WIRES` instances a span in a block of their own. */
 class WireStore {
@@ -278,7 +183,12 @@ class WireStore {
 
 export class PoleLayer implements Utilities {
   readonly group = new Group();
-  private readonly parts: PartStore[];
+  private readonly stores: readonly RunStore[];
+  private readonly parts: InstanceRuns;
+  /** The poles' runs placed and taken away since the last flush. */
+  private readonly coming = new Set<Run>();
+  private readonly going: Run[] = [];
+  private readonly matrix = new Float32Array(16);
   private readonly wires: WireStore;
   private readonly poles = new Map<PoleId, PoleState>();
   /** Each span strung here, with its block. */
@@ -287,16 +197,27 @@ export class PoleLayer implements Utilities {
   private readonly index = new PoleIndex();
   private readonly scratch: Placement[][] = Array.from({ length: POLE_PART_COUNT }, () => []);
 
-  constructor(kit: SceneryKit, name = 'utilities') {
+  /** `width`: the view's width in pixels, for the cut by size (none: every part in view is drawn). */
+  constructor(kit: SceneryKit, name = 'utilities', width?: () => number) {
     this.group.name = name;
-    this.parts = polePartSpecs(kit).map((spec) => new PartStore(spec, this.group));
+    this.stores = partStores(kit);
+    const cut: PixelCut | null = width ? { least: SEEN_PIXELS, width } : null;
+    this.parts = createInstanceRuns(`${name}-parts`, this.stores, SHADOW_REACH, cut);
+    this.group.add(this.parts.group);
     this.wires = new WireStore(this.group);
   }
 
   get triangles(): number {
-    let triangles = 0;
-    for (const part of this.parts) triangles += part.perInstance * part.count;
-    return triangles;
+    return this.parts.triangles;
+  }
+
+  cull(frustum: Frustum, view: Matrix4): void {
+    this.parts.cull(frustum, view);
+  }
+
+  /** One mesh of each part, one instance each: what compiles the parts' programs ahead (`compileAhead`). */
+  warm(): InstancedMesh[] {
+    return warmMeshes(this.stores);
   }
 
   /** The poles this layer holds inside a rectangle, where it drew them. */
@@ -370,28 +291,28 @@ export class PoleLayer implements Utilities {
     const kerb = kept !== undefined ? kept : kerbward(net, { x: pole.x, y: pole.y }, m(6));
     // A pole with no wire yet stands square to its street.
     const frame = poleArmsAt(pole, source.spansAt(pole.id), source.poles, () => kerb ?? { x: 0, y: 1 });
-    const slots: number[][] = Array.from({ length: POLE_PART_COUNT }, () => []);
+    let run: Run | null = null;
     if (source.draws?.(pole) ?? true) {
       const out = this.scratch;
       for (const list of out) list.length = 0;
       placePole(pole, top, frame, kerb, groundAt, out);
-      out.forEach((list, part) => { for (const placement of list) slots[part]!.push(this.parts[part]!.add(pole.id, placement)); });
+      const builder = new RunBuilder(this.stores);
+      out.forEach((list, part) => {
+        for (const placement of list) {
+          writePlacement(placement, this.matrix, 0);
+          builder.add(part, this.matrix, Math.max(Math.abs(placement.sx), Math.abs(placement.sy), Math.abs(placement.sz)));
+        }
+      });
+      run = builder.build();
+      this.coming.add(run);
     }
-    this.poles.set(pole.id, { x: pole.x, y: pole.y, top, kerb, frame, slots });
+    this.poles.set(pole.id, { x: pole.x, y: pole.y, top, kerb, frame, run });
     this.index.putPole(pole);
   }
 
   private unplace(id: PoleId, state: PoleState): void {
-    state.slots.forEach((slots, part) => {
-      const store = this.parts[part]!;
-      // Highest first: the last slot is then never one of this pole's still to go.
-      for (const slot of [...slots].sort((a, b) => b - a)) {
-        const moved = store.remove(slot);
-        if (moved === null) continue;
-        const theirs = this.poles.get(moved)!.slots[part]!;
-        theirs[theirs.indexOf(store.count)] = slot;
-      }
-    });
+    // A run placed since the last flush never reached the layer: it is only not placed.
+    if (state.run && !this.coming.delete(state.run)) this.going.push(state.run);
     this.poles.delete(id);
     this.index.deletePole(id);
   }
@@ -418,13 +339,17 @@ export class PoleLayer implements Utilities {
   }
 
   private flush(): void {
-    for (const part of this.parts) part.flush();
+    if (this.coming.size || this.going.length) {
+      this.parts.update({ added: [...this.coming], removed: this.going });
+      this.coming.clear();
+      this.going.length = 0;
+    }
     this.wires.flush();
   }
 
   dispose(): void {
     // The instances and the wires are this layer's; the parts' shapes and materials are shared (`PARTS`).
-    for (const part of this.parts) part.dispose();
+    this.parts.dispose();
     this.wires.dispose();
     this.group.clear();
   }
@@ -437,8 +362,9 @@ export function buildUtilities(
   kit: SceneryKit,
   source: PoleSource = docPoles(net.doc),
   name = 'utilities',
+  width?: () => number,
 ): PoleLayer {
-  const layer = new PoleLayer(kit, name);
+  const layer = new PoleLayer(kit, name, width);
   layer.fill(net, groundAt, source);
   return layer;
 }
@@ -454,7 +380,7 @@ export function buildPolePreview(
   groundAt: (x: number, y: number) => number,
   kit: SceneryKit,
   input: PolePreviewInput,
-): Utilities {
+): PoleLayer {
   const poles = new Map<PoleId, UtilityPole>();
   const spans = new Map<SpanId, UtilitySpan>();
   const reaching = new Map<PoleId, UtilitySpan[]>();

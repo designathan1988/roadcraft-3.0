@@ -96,7 +96,7 @@ import { Engine } from '@core/engine';
 import { fadeMeshes } from './buildings/fade';
 import { RevealGate } from './revealGate';
 import { createGpuTimer, type GpuTimer } from './gpuTimer';
-import { poleGroundAt, type Utilities } from './utilities';
+import { poleGroundAt } from './utilities';
 import { type PoleLayer, buildPolePreview, buildUtilities, docPoles, type PolePreviewInput } from './poleLayer';
 import { createBarriers } from './barriers';
 import { buildTrackPreview, createTrackPreview, createTransit, type TrackPreview } from './transit';
@@ -572,7 +572,7 @@ export function createSceneRenderer(
     fx.onBuildingDown((id) => { for (const listener of buildingDownListeners) listener(id); });
     onAssetsReady();
   });
-  let polePreview: Utilities | null = null;
+  let polePreview: PoleLayer | null = null;
   /** Placed signs, street name plates and the junctions' rule plates, kept sign by sign from the diary (`signLayer.ts`). */
   const signs = createSignLayer();
   let polePreviewKey = '';
@@ -764,6 +764,8 @@ export function createSceneRenderer(
     pixelFoot.applyMatrix4(crowdProjection);
     return Math.hypot((pixelOther.x - pixelFoot.x) * cssHalfW, (pixelOther.y - pixelFoot.y) * cssHalfH);
   };
+  /** The drawing buffer's width in pixels: what the poles' cut by size on the screen counts in (`instanceRuns.ts` `PixelCut`). */
+  const viewWidth = (): number => renderer.domElement.width;
   /** Half the canvas's CSS size, read once a frame (`draw`). */
   let cssHalfW = 1, cssHalfH = 1;
   // A vehicle is tested with its own reach, grown by its height towards the sun's side
@@ -1345,7 +1347,7 @@ export function createSceneRenderer(
     const before = utilities?.triangles ?? 0;
     if (!utilities || entries === null || entries.some((e) => e.rects === null)) {
       if (utilities) { world.remove(utilities.group); utilities.dispose(); }
-      utilities = buildUtilities(net, groundAt, sceneryKit, docPoles(net.doc));
+      utilities = buildUtilities(net, groundAt, sceneryKit, docPoles(net.doc), 'utilities', viewWidth);
       world.add(utilities.group);
     } else {
       utilities.follow(net, groundAt, net.doc, entries);
@@ -1593,12 +1595,15 @@ export function createSceneRenderer(
       const flat = (): number => 0;
       const warmElevation = buildRoadElevation(warmNet, flat);
       const group = new Group();
+      const warmPoles = buildUtilities(warmNet, poleGroundAt(warmElevation, flat), sceneryKit);
       const parts = [
         buildRoadSurfaces(warmNet, warmElevation, materials, flat, undefined, terrain.vergeMaterial),
         buildStructureDetails(warmNet, warmElevation, flat, materials),
-        buildUtilities(warmNet, poleGroundAt(warmElevation, flat), sceneryKit),
+        warmPoles,
       ];
       for (const part of parts) group.add(part.group);
+      // The poles' parts are drawn only once culled: one instance of each compiles their programs.
+      group.add(...warmPoles.warm());
       // And the street furniture's, the long grass's and the signs' meshes as their layers draw them, with their shadows
       const placedShadows = new Group();
       for (const mesh of [...furniture.warm(), ...signs.warm()]) {
@@ -2646,6 +2651,8 @@ export function createSceneRenderer(
       cssHalfH = renderer.domElement.clientHeight * 0.5;
       // Plants and street furniture outside the view are not drawn at all.
       furniture.cull(crowdFrustum, crowdProjection);
+      utilities?.cull(crowdFrustum, crowdProjection);
+      polePreview?.cull(crowdFrustum, crowdProjection);
       signs.cull(crowdFrustum, crowdProjection);
       barriers.cull(crowdFrustum, crowdProjection);
       transit.cull(crowdFrustum, crowdProjection);
