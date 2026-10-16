@@ -411,9 +411,6 @@
     },
     "roadcraft/no-global-revision": {
       "count": 24
-    },
-    "roadcraft/no-silent-catch": {
-      "count": 1
     }
   },
   "src/render/riderPoses.ts": {

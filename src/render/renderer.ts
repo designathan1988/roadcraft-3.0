@@ -132,10 +132,10 @@ import { BLUEPRINTS, instantiate } from '@world/buildings/blueprints';
 import type { Building, BuildingId } from '@world/buildings/types';
 import { QUALITY, QualityGovernor, type QualityLevel, type QualitySettings } from './quality';
 import { type GroundRecord, type Rect, unionRect } from './groundChanges';
-import { FOREST_SPECIES, createGroundCoverKit } from './groundCover';
+import { createGroundCoverKit } from './groundCover';
 import { clearingIndex } from '@world/trees';
 import { isCoverKind } from '@world/terrainPaint';
-import { buildNatureForest, loadNatureTrees, type NatureTreeKit } from './natureTrees';
+import { loadNatureTrees, type NatureTreeKit } from './natureTrees';
 import { createFogField, createFogTexture, type FogLayer } from './fogLayer';
 import { createElementLayer, loadElementKit, type ElementKit, type ElementLayer } from './elements';
 
@@ -831,7 +831,14 @@ export function createSceneRenderer(
   let elementLayer: ElementLayer | null = null;
   /** What the elements follow in the diary: they themselves, and the land and the ground under them. */
   const elementRead = new JournalCursor(['elements', 'terrain', 'ground']);
-  void loadElementKit(anisotropy).then((kit) => { elementKit = kit; }, (error: unknown) => {
+  void loadElementKit(anisotropy).then(async (kit) => {
+    // Its programs built before the first element is drawn, with their shadows.
+    const sample = createElementLayer(kit);
+    await compileSamples(sample.warm());
+    sample.dispose();
+    elementKit = kit;
+    onAssetsReady();
+  }, (error: unknown) => {
     console.warn('[elements] models not loaded', error);
   });
   /** The weather drawn (`world/weather.ts`) */
@@ -870,16 +877,8 @@ export function createSceneRenderer(
     natureTreesStarted = true;
     void loadNatureTrees(anisotropy).then(async (kit) => {
       // Its programs built before the first forest is drawn - its shadow's too, wind-swayed (`uploads.ts` shadowStandIn)
-      const sample = buildNatureForest(FOREST_SPECIES.flatMap((species) => [0.1, 0.35, 0.6, 0.85].map((seed) => ({ x: 0, y: 0, z: 0, size: m(12), yaw: 0, seed, species }))), kit);
-      const lit = new Group(), shadows = new Group();
-      for (const mesh of sample.meshes) {
-        lit.add(mesh);
-        const standIn = shadowStandIn(mesh);
-        if (standIn) shadows.add(standIn);
-      }
-      await Promise.all([compileAhead(lit), compileAhead(shadows, true)]);
-      lit.clear();
-      shadows.clear();
+      const sample = createTreeCells(kit, 'nature-warm', () => []);
+      await compileSamples(sample.warm());
       sample.dispose();
       natureTreeKit = kit;
       // The kept trees are grown with it at the next look.
@@ -892,14 +891,42 @@ export function createSceneRenderer(
       onAssetsReady();
     });
   };
-  // One representative per material and mesh program variant is enough for compileAsync.
-  const compiledVariants = new WeakMap<Material, Set<string>>();
-  let compileCheckedAt = 0;
-  let compiling = false;
-  /** The look for new materials in progress and their representative objects. */
-  const scanStack: Object3D[] = [];
-  const compileSamples: Object3D[] = [];
-  const SCAN_PER_FRAME = 1500;
+  /** Meshes' programs built ahead for the target the scene is drawn into, and their shadows' (`uploads.ts`); resolved once all are. */
+  function compileSamples(meshes: readonly Object3D[]): Promise<void> {
+    const lit = new Group(), shadows = new Group();
+    for (const mesh of meshes) {
+      lit.add(mesh);
+      const standIn = (mesh as Mesh).isMesh ? shadowStandIn(mesh as Mesh) : null;
+      if (standIn) shadows.add(standIn);
+    }
+    return Promise.all([compileAhead(lit), compileAhead(shadows, true)]).then(() => { lit.clear(); shadows.clear(); });
+  }
+  /** THE PROGRAMS OF A WORLD, BUILT AT ITS LOAD: one copy of each material in each way it is drawn (`compileCopy`) */
+  const compileScene = (): Promise<void> => {
+    const known = new Map<Material, Set<string>>();
+    const samples: Object3D[] = [];
+    scene.traverse((o) => {
+      const material = (o as Mesh).material as Material | Material[] | undefined;
+      if (!material) return;
+      const mesh = o as Mesh & { isInstancedMesh?: boolean; instanceColor?: unknown; isSkinnedMesh?: boolean };
+      const variant = mesh.isSkinnedMesh ? 'skinned' : mesh.isInstancedMesh ? mesh.instanceColor ? 'instanced-color' : 'instanced' : o.type;
+      let fresh = false;
+      for (const each of Array.isArray(material) ? material : [material]) {
+        let seen = known.get(each);
+        if (!seen) known.set(each, seen = new Set());
+        if (!seen.has(variant)) { seen.add(variant); fresh = true; }
+      }
+      if (!fresh) return;
+      // Shown in the copy: three's compile walks only what is visible, and a mesh hidden until it has something to draw is not.
+      const copy = compileCopy(o);
+      copy.visible = true;
+      samples.push(copy);
+    });
+    return compileSamples(samples);
+  };
+  /** The world's programs being built at its load (`compileScene`), and whether they are: the opening waits for them. */
+  let sceneCompiled: Promise<void> | null = null;
+  let sceneReady = false;
   /** The buildings cut open, for the people drawn inside them (`indoors.ts`). */
   let cutSpec: CutawaySpec | null = null;
   let skyMode: SkyMode = 'day';
@@ -1634,6 +1661,19 @@ export function createSceneRenderer(
     void compileAhead(partShadows, true).then(() => partShadows.clear());
   };
 
+  /** The plants' and stones' layers and the road blink compiled ahead: their meshes come with the first look or edit */
+  let plantShadersWarm = false;
+  /** @rebuild Once; every later frame returns at its first check. */
+  const warmPlantShaders = (): void => {
+    if (plantShadersWarm) return;
+    plantShadersWarm = true;
+    const cover = createCoverCells(coverKit, 'cover-warm', { rocksIn: () => [], scrubIn: () => [], treesIn: () => [] });
+    const blinkShape = new BufferGeometry();
+    blinkShape.setAttribute('position', new Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 0, 1], 3));
+    blinkShape.setAttribute('aRing', new Float32BufferAttribute([0, 0, 0], 1));
+    void compileSamples([...cover.warm(), new Mesh(blinkShape, blinkMaterial)]).then(() => { cover.dispose(); blinkShape.dispose(); });
+  };
+
   /** The tools' previews compiled ahead, as the roads' and the blows' are */
   let previewShadersWarm = false;
   /** @rebuild Once; every later frame returns at its first check. */
@@ -2029,6 +2069,9 @@ export function createSceneRenderer(
     },
     beginLoad() {
       reveal.begin();
+      // A world opened is a load: its programs built again before it is shown.
+      sceneCompiled = null;
+      sceneReady = false;
       openingSince = null;
       onAssetsReady();
     },
@@ -2325,51 +2368,6 @@ export function createSceneRenderer(
         }
         vegetationRedraw = false;
       }
-      // Discover new shader variants across frames, including hidden objects that may become visible as the player moves.
-      if (!compiling) {
-        if (scanStack.length === 0 && performance.now() - compileCheckedAt > 2000) {
-          compileCheckedAt = performance.now();
-          scanStack.push(scene);
-        }
-        for (let n = 0; n < SCAN_PER_FRAME && scanStack.length; n++) {
-          const o = scanStack.pop()!;
-          const material = (o as Mesh).material as Material | Material[] | undefined;
-          if (material) for (const m of Array.isArray(material) ? material : [material]) {
-            const mesh = o as Mesh & { isInstancedMesh?: boolean; instanceColor?: unknown; isSkinnedMesh?: boolean };
-            const variant = mesh.isSkinnedMesh ? 'skinned'
-              : mesh.isInstancedMesh ? mesh.instanceColor ? 'instanced-color' : 'instanced'
-                : o.type;
-            let known = compiledVariants.get(m);
-            if (!known) { known = new Set(); compiledVariants.set(m, known); }
-            if (!known.has(variant)) { known.add(variant); compileSamples.push(o); }
-          }
-          for (const child of o.children) scanStack.push(child);
-        }
-        if (scanStack.length === 0 && compileSamples.length > 0) {
-          const warm = new Group();
-          // Shown in the copy: three's compile walks only what is visible, and a mesh hidden until it has something to draw
-          const shadows = new Group();
-          for (const sample of compileSamples) {
-            const copy = compileCopy(sample);
-            copy.visible = true;
-            warm.add(copy);
-            const standIn = (sample as Mesh).isMesh ? shadowStandIn(sample as Mesh) : null;
-            if (standIn) shadows.add(standIn);
-          }
-          if (shadows.children.length) void compileAhead(shadows, true).then(() => shadows.clear());
-          compileSamples.length = 0;
-          compiling = true;
-          // For the target the scene is drawn into (`drainCompiles`).
-          const previous = renderer.getRenderTarget();
-          renderer.setRenderTarget(post.target);
-          void renderer.compileAsync(warm, rig.camera, scene).catch(() => {}).finally(() => {
-            warm.clear();
-            compiling = false;
-          });
-          renderer.setRenderTarget(previous);
-        }
-      }
-
       // The perspective camera kept out of the buildings (`IsoRig.setSolids`)
       followFloors(net);
       if (cameraSolidsKept.follow(net.doc.buildings, floorGroundSince)) {
@@ -2725,7 +2723,13 @@ export function createSceneRenderer(
       // The opening's town is shown whole
       openingSince ??= performance.now();
       if (!reveal.opened) {
-        const whole = roads !== null && !worldJob && !buildings.pending && natureTreesStarted && !natureTreesPending;
+        const built = roads !== null && !worldJob && !buildings.pending && natureTreesStarted && !natureTreesPending;
+        // Its programs built, every one of them at once and in parallel where the driver can, before the frame that shows it.
+        if (built && !sceneCompiled) {
+          // A world opened meanwhile (`beginLoad`) waits for its own.
+          const mine: Promise<void> = sceneCompiled = compileScene().then(() => { if (sceneCompiled === mine) { sceneReady = true; onAssetsReady(); } });
+        }
+        const whole = built && sceneReady;
         const next = reveal.step(whole, performance.now());
         if (next === 'warm') {
           // One frame drawn unseen first: the new meshes go to the GPU
@@ -2755,6 +2759,7 @@ export function createSceneRenderer(
       warmRoadShaders();
       warmBlastShaders();
       warmPreviewShaders();
+      warmPlantShaders();
       // One waiting body's geometry a frame to the GPU, before anybody draws it.
       drainWarm(renderer, rig.camera, scene, post.target);
       // Meshes still waiting to go up: another frame, so the queue never stands while the game is still.
