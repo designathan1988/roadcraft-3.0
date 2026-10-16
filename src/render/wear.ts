@@ -11,8 +11,11 @@ import {
 
 /** Wear: streets and footways that age with use (the player's order of 2026-10-05). */
 
-/** Texels across the map: about 0.94 m each on the 4 800-unit map. */
+/** Texels across the map: 5 m each on the 10 240 m map (`world/bounds.ts`). */
 const RES = 2048;
+/** Wear 1 as a 16-bit sum, and the half step that makes its high byte round (255 x 256 and 128). */
+const FULL = 255 * 256;
+const HALF_STEP = 128;
 /** Seconds between uploads of the field to the GPU. */
 const UPLOAD_EVERY = 2;
 
@@ -30,10 +33,11 @@ export interface WearField {
 export function createWearField(mapSize: number): WearField {
   const half = mapSize / 2;
   const cell = mapSize / RES;
-  const wheels = new Float32Array(RES * RES);
-  const feet = new Float32Array(RES * RES);
-  // RGBA though only red (wheels) and green (feet) are read: three uploads part of a texture
+  // RGBA though the shader reads only red (wheels) and green (feet): three uploads part of a texture only in RGBA. Blue and
+  // alpha hold the low bytes of each field's 16-bit sum, so the field is the texture itself, with no copy of it in floats.
   const bytes = new Uint8Array(RES * RES * 4);
+  // The sum is the wear times FULL plus a half step: its high byte is then the wear rounded to 255ths, as it was drawn.
+  for (let i = 0; i < RES * RES; i++) { bytes[i * 4 + 2] = HALF_STEP; bytes[i * 4 + 3] = HALF_STEP; }
   const texture = new DataTexture(bytes, RES, RES, RGBAFormat, UnsignedByteType);
   /** Per row, the first and last cell changed since the last upload. */
   const rowFrom = new Int32Array(RES).fill(RES);
@@ -45,11 +49,14 @@ export function createWearField(mapSize: number): WearField {
   texture.needsUpdate = true;
   let since = 0;
   let dirty = false;
-  const add = (field: Float32Array, x: number, y: number, amount: number): void => {
+  /** Adds to channel `field` (0 wheels, 1 feet) at a point: its 16-bit sum in the high byte (read) and the low byte two channels on. */
+  const add = (field: 0 | 1, x: number, y: number, amount: number): void => {
     const gx = Math.floor((x + half) / cell), gy = Math.floor((y + half) / cell);
     if (gx < 0 || gy < 0 || gx >= RES || gy >= RES) return;
-    const i = gy * RES + gx;
-    field[i] = Math.min(1, field[i]! + amount);
+    const at = (gy * RES + gx) * 4 + field;
+    const sum = Math.min(FULL + HALF_STEP, bytes[at]! * 256 + bytes[at + 2]! + Math.round(amount * FULL));
+    bytes[at] = sum >> 8;
+    bytes[at + 2] = sum & 255;
     if (gx < rowFrom[gy]!) rowFrom[gy] = gx;
     if (gx > rowTo[gy]!) rowTo[gy] = gx;
     dirty = true;
@@ -60,26 +67,21 @@ export function createWearField(mapSize: number): WearField {
       // Rubber on the two tracks: a busy lane darkens in a few minutes of traffic, and keeps darkening towards potholes.
       const nx = -Math.sin(angle), ny = Math.cos(angle);
       const k = dt * 0.05;
-      add(wheels, x + nx * width / 2, y + ny * width / 2, k);
-      add(wheels, x - nx * width / 2, y - ny * width / 2, k);
+      add(0, x + nx * width / 2, y + ny * width / 2, k);
+      add(0, x - nx * width / 2, y - ny * width / 2, k);
     },
     feet(x, y, dt) {
-      add(feet, x, y, dt * 0.02);
+      add(1, x, y, dt * 0.02);
     },
     tick(dt) {
       since += dt;
       if (!dirty || since < UPLOAD_EVERY) return;
       since = 0;
       dirty = false;
-      // Only the stretches of rows that changed: converted and sent alone.
+      // Only the stretches of rows that changed are sent.
       for (let gy = 0; gy < RES; gy++) {
         const from = rowFrom[gy]!, to = rowTo[gy]!;
         if (to < 0) continue;
-        for (let gx = from; gx <= to; gx++) {
-          const i = gy * RES + gx;
-          bytes[i * 4] = Math.round(wheels[i]! * 255);
-          bytes[i * 4 + 1] = Math.round(feet[i]! * 255);
-        }
         texture.addUpdateRange((gy * RES + from) * 4, (to - from + 1) * 4);
         rowFrom[gy] = RES;
         rowTo[gy] = -1;

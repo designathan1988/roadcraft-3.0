@@ -110,8 +110,9 @@ GPU memory and drawing
   (`gardens.ts:281-287, 512, 516`).
 - Vehicle models non-indexed (`vehicleModels.ts` `merge`): index them only with the wreck
   (`agents.ts`, normals recomputed after denting) keeping its own non-indexed copy.
-- The wear field is dense over the whole map (`wear.ts`: 2048² Float32 x2 + RGBA = 48 MB on the CPU
-  from boot, 5 m texels on the 10 km map). Fix: sparse tiles where there is wear.
+- Whole-map dense grids from boot, quadratic in the map's side: the wear texture (`wear.ts`, 2048²
+  RGBA = 17 MB, 5 m texels) and the terrain's fields (ecology, gullies, light, wetness, heights,
+  ~6-7 MB each, ~70 MB). Fix for a larger map: sparse tiles where there is something.
 - About 43 draw calls per building cell: a mesh per finish and an `InstancedMesh` per part kind
   (`buildingMesh.ts:3531, 3573`).
 - Needs shots and the player's yes: signature buildings without a far level (`massing.ts:157`);
@@ -171,12 +172,12 @@ Player's decisions
   way or they lost detail. Needs before/after shots of the same views and the player's call.
 
 Memory measured (heap snapshots, SwiftShader, `scratchpad` probes; 2026-10-16):
-- At boot, no city: 63 MB of JS objects and 604 MB of array buffers (328 MB held by JS: wear
-  field 50 MB, instance buffers, terrain grids; 235 MB held by the browser in 608 buffers the
-  snapshot cannot attribute).
+- At boot, no city: 63 MB of JS objects and 604 MB of array buffers, all held by JS (the 235 MB
+  that look held by the browser came from workers by structured clone): wear field 50 MB (now 17),
+  instance buffers, the terrain's whole-map grids.
 - After a 1.2 km city (4,694 buildings), garbage collected: 352 MB of objects (2.7 M `Object`s and
   1.2 M element arrays: the document's points, ~32 KB a building), 690 MB of buffers held by JS
-  (gardens' matrices, spheres and colours 43 MB, ~9 KB a building) and 540 MB held by the browser.
+  (gardens' matrices, spheres and colours 43 MB, ~9 KB a building) and 540 MB more from workers.
 - The heap does not grow with zoom: map and district views weigh the same after a GC (1.2 GB);
   the 2.6 GB seen in shots was garbage not yet collected.
 
