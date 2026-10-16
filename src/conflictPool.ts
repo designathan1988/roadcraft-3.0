@@ -210,8 +210,8 @@ export class ConflictPool implements PairMeasurer {
     if (typeof Worker === 'undefined') { this.broken = true; return null; }
     const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
     const count = Math.max(1, Math.min(MOST_LANES, cores - 1));
+    const lanes: Lane[] = [];
     try {
-      const lanes: Lane[] = [];
       for (let k = 0; k < count; k++) {
         const worker = new Worker(new URL('./conflictTable.worker.ts', import.meta.url), { type: 'module' });
         const lane: Lane = { worker, waiting: new Map(), watchdog: null };
@@ -237,6 +237,8 @@ export class ConflictPool implements PairMeasurer {
       }
       this.lanes = lanes;
     } catch (error) {
+      // The workers already made end too: a half-made pool is never used and would run on unreachable.
+      for (const lane of lanes) lane.worker.terminate();
       console.warn('[traffic] the conflict workers are unavailable; the pairs are measured on the page', error);
       this.broken = true;
       this.lanes = null;

@@ -55,4 +55,19 @@ describe('the conflict pool', () => {
     expect(worker.terminated).toBe(false);
     pool.dispose();
   });
+
+  it('ends the workers it already made when a later one cannot be made', async () => {
+    vi.stubGlobal('navigator', { hardwareConcurrency: 4 });
+    class SecondFails extends FakeWorker {
+      constructor() {
+        super();
+        if (FakeWorker.made.length === 2) throw new Error('no more workers');
+      }
+    }
+    vi.stubGlobal('Worker', SecondFails);
+    const pool = new ConflictPool();
+    await expect(pool.measure([{ a: sweep(), b: sweep() }])).rejects.toThrow('no workers');
+    expect(FakeWorker.made.length).toBe(2);
+    expect(FakeWorker.made[0]!.terminated).toBe(true);
+  });
 });

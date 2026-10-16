@@ -54,6 +54,8 @@ function start(): Lane[] | null {
       lanes.push(lane);
     }
   } catch (error) {
+    // The workers already made end too: a half-made pool is never used and would run on unreachable.
+    for (const lane of lanes ?? []) lane.worker.terminate();
     console.warn('[terrain] the land workers are unavailable; the land is read on the page', error);
     broken = true;
     lanes = null;
