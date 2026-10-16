@@ -18,6 +18,8 @@ function parts(doc: RoadDoc): unknown {
   return JSON.parse(JSON.stringify({
     nodes: sorted(doc.nodes.values()), segments: sorted(doc.segments.values()),
     buildings: sorted(doc.buildings.all()), lots: sorted(doc.lotStore.all()), transit: doc.transit,
+    // The lots' order too: the growth takes the open lots in it (`world/openLots.ts`).
+    order: [...doc.lotStore.all()].map((l) => [l.id, doc.lotStore.orderOf(l.id)]),
   }));
 }
 
@@ -65,6 +67,12 @@ describe('the copy of the document the simulation reads', () => {
     doc.buildings.remove(ids[0]! as BuildingId);
     doc.buildings.remove(ids[3]! as BuildingId);
     growOnLot({ doc, net, groundAt: () => 0 }, refused, 0x5eed);
+    sync();
+    // A lot taken away and put back (an undo): last in the order now, there in the copy too.
+    const lot = [...doc.lotStore.all()][2]!;
+    doc.lotStore.apply({ remove: [lot.id] }, 'taken');
+    doc.lotStore.restore([{ id: lot.id, value: lot }], 'put back');
+    expect([...doc.lotStore.all()].at(-1)).toBe(lot);
     sync();
     // Nothing changed: no patch.
     expect(feed.take(doc)).toBeNull();

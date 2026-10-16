@@ -58,7 +58,8 @@ import { markAll, markBox } from './mesh/updateRanges';
 import { DETAIL_GLSL, detailSwitch, detailTextures } from './mesh/detailLayer';
 import { applyLotOverlay } from './lotOverlay';
 import { WATER_DEPTH_ATTRIBUTE, WATER_FLOW_ATTRIBUTE, createWaterSurface, type WaterLook } from './water';
-import { type CornerGrid, type TerrainRegion, type TerrainShaper, boxRegion, sampleCorners, shapeCorners } from './terrainShaping';
+import { type CornerGrid, type TerrainRegion, type TerrainShaper, boxRegion, cornerWindow, sampleCorners, shapeCorners } from './terrainShaping';
+import type { PlateCorners, TerrainPack } from './heightTile';
 import { type NaturalPlate, type PlateShapeAnswer, type PlateShapeAsk, askPlate } from './groundShape';
 import type { Aabb } from '@core/aabb';
 
@@ -170,6 +171,10 @@ export interface TerrainSurface {
   naturalCorners?(): { readonly natural: Float64Array; readonly diagonals: Uint8Array };
   /** The atlas's plates' natural ground a set of world boxes reads */
   naturalCut?(boxes: readonly (readonly [number, number, number, number])[]): NaturalPlate[];
+  /** The plate's corners drawn and as they were round a box of its own coordinates, for a worker (`heightTile.ts`). */
+  packCorners?(box: Aabb): PlateCorners;
+  /** The ground round a world box for a worker (`heightTile.ts`): the atlas's plate under its middle. */
+  packHeights?(rect: readonly [number, number, number, number]): TerrainPack;
   /** The grid corners a world box covers, as `shapeToRoads` takes them. */
   regionOf(box: readonly [number, number, number, number]): TerrainRegion;
   /** A region back as the world box it covers, a cell round. */
@@ -2572,6 +2577,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       };
     },
     naturalCorners: () => ({ natural, diagonals: naturalFlip }),
+    packCorners: (box) => ({ grid: plateGrid, drawn: cornerWindow(plateGrid, grid, flip, box), natural: cornerWindow(plateGrid, natural, naturalFlip, box) }),
     update(doc, stroking = false) {
       diary = doc.changes;
       if (revision === doc.terrainRevision) return false;
