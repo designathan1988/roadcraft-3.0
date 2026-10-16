@@ -356,3 +356,60 @@ describe('a one-road edit copies what it touches', () => {
     expect(copied).toBeLessThan(records / 100);
   });
 });
+
+describe('a copy put back (`clone`, then `replaceWith`: a refused edit undone)', () => {
+  /** A grown city with poles, wires, furniture and a wall. */
+  function town(): RoadDoc {
+    const { doc } = growCity({ seed: 3, size: 'small', style: 'blocks' });
+    const nodes = [...doc.nodes.values()];
+    for (let k = 0; k + 1 < 12; k += 2) {
+      const p = doc.addPole({ x: nodes[k]!.x + 9, y: nodes[k]!.y + 9 }), q = doc.addPole({ x: nodes[k + 1]!.x + 9, y: nodes[k + 1]!.y + 9 });
+      doc.addPoleSpan(p.id, q.id);
+      doc.addLandscape('bench', { x: nodes[k]!.x + 12, y: nodes[k]!.y });
+    }
+    doc.addBarrier('wall', [{ x: 0, y: 0 }, { x: 30, y: 0 }]);
+    return doc;
+  }
+
+  it('puts back exactly what the copy holds, read by the ids either diary names', () => {
+    const doc = town();
+    const before = doc.clone();
+    const want = content(before);
+    const node = [...doc.nodes.values()].find((n) => n.incident.length === 2)!;
+    doc.moveNode(node.id, { x: node.x + 7, y: node.y - 3 });
+    const pole = [...doc.poles.values()][2]!;
+    doc.removePole(pole.id);
+    const bench = doc.addLandscape('bench', { x: 50, y: 50 });
+    const wall = [...doc.barriers.values()][0]!;
+    doc.removeBarrier(wall.id);
+    doc.buildings.remove([...doc.buildings.all()][1]!.id);
+    // What no edit touched, held before: the same records after, never copied again.
+    const still = { node: [...doc.nodes.values()].at(-1)!, segment: [...doc.segments.values()].at(-1)!, pole: [...doc.poles.values()].at(-1)!, item: [...doc.landscape.values()][0]! };
+    const v = doc.changes.version;
+    doc.replaceWith(before);
+    expect(content(doc)).toBe(want);
+    expect(doc.nodes.get(still.node.id)).toBe(still.node);
+    expect(doc.segments.get(still.segment.id)).toBe(still.segment);
+    expect(doc.poles.get(still.pole.id)).toBe(still.pole);
+    expect(doc.landscape.get(still.item.id)).toBe(still.item);
+    const written = doc.changes.since(v)!;
+    // Only the kinds that moved, and of each only the records that did.
+    expect(new Set(written.map((e) => e.kind))).toEqual(new Set(['roads', 'traffic', 'utilities', 'landscape', 'barriers', 'buildings']));
+    expect(written.find((e) => e.kind === 'landscape')!.ids).toEqual([bench.id]);
+    expect(written.find((e) => e.kind === 'barriers')!.ids).toEqual([wall.id]);
+    expect(written.find((e) => e.kind === 'utilities')!.ids).toContain(pole.id);
+    expect(written.find((e) => e.kind === 'roads')!.ids!.length).toBeLessThan(12);
+  });
+
+  it('and when the copy was edited too, ends as the copy', () => {
+    const doc = town();
+    const copy = doc.clone();
+    const [n1, n2] = [...doc.nodes.values()].filter((n) => n.incident.length === 2);
+    doc.moveNode(n1!.id, { x: n1!.x + 5, y: n1!.y });
+    copy.moveNode(n2!.id, { x: n2!.x - 5, y: n2!.y });
+    copy.addLandscape('bin', { x: 70, y: 70 });
+    doc.addPole({ x: 90, y: 90 });
+    doc.replaceWith(copy);
+    expect(content(doc)).toBe(content(copy));
+  });
+});
