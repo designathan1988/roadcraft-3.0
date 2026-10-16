@@ -2,10 +2,11 @@ import {
   BufferAttribute,
   BufferGeometry,
   CanvasTexture,
-  Color,
   DoubleSide,
   FrontSide,
-  InstancedMesh,
+  type Frustum,
+  type Group,
+  type InstancedMesh,
   Matrix4,
   MeshStandardMaterial,
   PlaneGeometry,
@@ -16,9 +17,12 @@ import {
   Vector3,
   type Texture,
 } from 'three';
+import type { ChangeRect } from '@world/changes';
 import { isEffectKind, type EffectKind, type ElementItem, type ElementKind } from '@world/elements';
 import { m } from '@world/units';
+import { keepCellAt, keepCellBox, keepCellsOver } from './candidateKeep';
 import type { Exhaust, PuffKind } from './exhaust';
+import { RunBuilder, createInstanceRuns, warmMeshes, type Run, type RunStore } from './instanceRuns';
 import URLS from 'virtual:model-urls/elements?ext=gltf,bin,png';
 
 /** The ELEMENTS the player lays with the brush (`world/elements.ts`), drawn: props as instanced models */
@@ -221,70 +225,132 @@ export async function loadElementKit(anisotropy: number): Promise<ElementKit> {
   };
 }
 
+/** What the elements are read from (`RoadDoc`): the list, and the elements by place. */
+interface ElementSource {
+  readonly elements: readonly ElementItem[];
+  elementsIn(rect: ChangeRect): ElementItem[];
+}
+
+/** What changed for the elements, from the diary: where elements came or went, where the ground under them moved; null */
+interface ElementChanges {
+  readonly items: readonly ChangeRect[] | null;
+  readonly ground: readonly ChangeRect[] | null;
+}
+
 export interface ElementLayer {
-  readonly meshes: readonly InstancedMesh[];
+  readonly group: Group;
+  readonly triangles: number;
+  /** The cells the changes reached drawn again from the document (`ElementSource.elementsIn`), the others kept as they stand. */
+  sync(changes: ElementChanges, doc: ElementSource, groundAt: (x: number, y: number) => number): void;
+  /** Keeps the instances the camera can see, or see the shadows of (`InstanceRuns.cull`). */
+  cull(frustum: Frustum, view: Matrix4): void;
   /** Gives off the effects' particles near the camera (three's x, y, z), `dt` seconds on. */
   emit(dt: number, eye: Vector3, exhaust: Exhaust): void;
   readonly hasEffects: boolean;
+  /** One mesh of each store, one instance each: what compiles the layer's programs ahead (`warmMeshes`). */
+  warm(): InstancedMesh[];
   dispose(): void;
 }
 
-/** The elements, instanced per kind, variant and part, standing on the ground (`groundAt`); the effects as emitters. */
-export function buildElementLayer(items: readonly ElementItem[], kit: ElementKit, groundAt: (x: number, y: number) => number): ElementLayer {
-  const meshes: InstancedMesh[] = [];
-  const groups = new Map<string, ElementItem[]>();
-  const emitters: { item: ElementItem; z: number; owed: number }[] = [];
-  for (const item of items) {
-    if (isEffectKind(item.kind)) { emitters.push({ item, z: groundAt(item.x, item.y), owed: 0 }); continue; }
-    const variants = kit.models.get(item.kind);
-    if (!variants?.length) continue;
-    const v = Math.min(variants.length - 1, Math.floor(item.seed * variants.length));
-    const key = `${item.kind}:${v}`;
-    const list = groups.get(key);
-    if (list) list.push(item); else groups.set(key, [item]);
+/** An effect element giving off its particles, on the ground it stands on. */
+interface Emitter { readonly item: ElementItem; readonly z: number; owed: number }
+
+/** The props that throw a shadow: the solid and the tall ones. */
+const casts = (kind: ElementKind): boolean => kind === 'stones' || kind === 'pebbles' || kind === 'scrub' || kind === 'fern' || kind === 'tallGrass';
+/** How far off the view a prop still throws a shadow into it, low sun. */
+const ELEMENT_SHADOW_REACH = m(8);
+
+/** DO NOT build every element of the map again on a change of the elements or of the land anywhere */
+export function createElementLayer(kit: ElementKit): ElementLayer {
+  const stores: RunStore[] = [];
+  /** Each kind's variants, each its parts' stores. */
+  const storesOf = new Map<ElementKind, number[][]>();
+  for (const [kind, variants] of kit.models) {
+    storesOf.set(kind, variants.map((parts) => parts.map((part) => stores.push({
+      name: `element-${kind}`, geometry: part.geometry, material: part.material,
+      castShadow: casts(kind), receiveShadow: true, tinted: true, cards: false,
+    }) - 1)));
   }
+  const runs = createInstanceRuns('elements', stores, ELEMENT_SHADOW_REACH);
+  const drawn = new Map<number, Run>();
+  const emitters = new Map<number, Emitter[]>();
+  let emitting = 0;
   const matrix = new Matrix4(), position = new Vector3(), rotation = new Quaternion(), scale = new Vector3(), up = new Vector3(0, 1, 0);
-  const colour = new Color();
-  for (const [key, list] of groups) {
-    const [kind, v] = key.split(':') as [ElementKind, string];
-    const parts = kit.models.get(kind)![Number(v)]!;
-    for (const part of parts) {
-      const mesh = new InstancedMesh(part.geometry, part.material, list.length);
-      mesh.name = `element-${kind}`;
-      mesh.castShadow = kind === 'stones' || kind === 'pebbles' || kind === 'scrub' || kind === 'fern' || kind === 'tallGrass';
-      mesh.receiveShadow = true;
-      list.forEach((item, i) => {
-        position.set(item.x, groundAt(item.x, item.y), -item.y);
-        rotation.setFromAxisAngle(up, item.yaw);
-        scale.setScalar(item.size);
-        matrix.compose(position, rotation, scale);
-        mesh.setMatrixAt(i, matrix);
-        const t = 0.88 + ((item.seed * 7.31) % 1) * 0.24;
-        mesh.setColorAt(i, colour.setRGB(t, t, t));
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.computeBoundingSphere();
-      meshes.push(mesh);
+  const tint = { r: 1, g: 1, b: 1 };
+  /** A cell's elements made again: its props a run, its effects emitters. */
+  const remake = (cell: number, items: readonly ElementItem[], groundAt: (x: number, y: number) => number, removed: Run[], added: Run[]): void => {
+    const was = drawn.get(cell);
+    if (was) { removed.push(was); drawn.delete(cell); }
+    emitting -= emitters.get(cell)?.length ?? 0;
+    emitters.delete(cell);
+    const builder = new RunBuilder(stores);
+    const mine: Emitter[] = [];
+    for (const item of items) {
+      if (isEffectKind(item.kind)) { mine.push({ item, z: groundAt(item.x, item.y), owed: 0 }); continue; }
+      const variants = storesOf.get(item.kind);
+      if (!variants?.length) continue;
+      const parts = variants[Math.min(variants.length - 1, Math.floor(item.seed * variants.length))]!;
+      position.set(item.x, groundAt(item.x, item.y), -item.y);
+      rotation.setFromAxisAngle(up, item.yaw);
+      scale.setScalar(item.size);
+      matrix.compose(position, rotation, scale);
+      const t = 0.88 + ((item.seed * 7.31) % 1) * 0.24;
+      tint.r = t; tint.g = t; tint.b = t;
+      for (const store of parts) builder.add(store, matrix.elements, item.size, tint);
     }
-  }
+    const run = builder.build();
+    if (run.size) { drawn.set(cell, run); added.push(run); }
+    if (mine.length) { emitters.set(cell, mine); emitting += mine.length; }
+  };
   return {
-    meshes,
-    hasEffects: emitters.length > 0,
+    group: runs.group,
+    get triangles() { return runs.triangles; },
+    sync(changes, doc, groundAt) {
+      const cells = new Set<number>();
+      if (changes.items === null || changes.ground === null) {
+        /** @rebuild Every element: a map opened, or a change the diary cannot place. */
+        for (const cell of drawn.keys()) cells.add(cell);
+        for (const cell of emitters.keys()) cells.add(cell);
+        for (const item of doc.elements) cells.add(keepCellAt(item.x, item.y));
+      } else {
+        for (const r of changes.items) keepCellsOver(r, cells);
+        // The ground moved: only the cells that hold elements are set on it again.
+        const reached = new Set<number>();
+        for (const r of changes.ground) keepCellsOver(r, reached);
+        for (const cell of reached) if (drawn.has(cell) || emitters.has(cell)) cells.add(cell);
+      }
+      if (!cells.size) return;
+      const removed: Run[] = [], added: Run[] = [];
+      for (const cell of cells) remake(cell, doc.elementsIn(keepCellBox(cell)).filter((item) => keepCellAt(item.x, item.y) === cell), groundAt, removed, added);
+      if (removed.length || added.length) runs.update({ removed, added });
+    },
+    cull(frustum, view) { runs.cull(frustum, view); },
+    get hasEffects() { return emitting > 0; },
     emit(dt, eye, exhaust) {
-      for (const e of emitters) {
-        const { item } = e;
-        if (Math.hypot(item.x - eye.x, e.z - eye.y, -item.y - eye.z) > EFFECT_REACH) continue;
-        const fx = EFFECTS[item.kind as EffectKind];
-        e.owed += fx.rate * (item.intensity ?? 0.5) * Math.max(0.5, item.size / m(2)) * dt;
-        const n = Math.floor(e.owed);
-        if (n <= 0) continue;
-        e.owed -= n;
-        exhaust.burst(item.x, item.y, e.z + item.size * fx.rise, n, fx.puff, item.size * fx.spread, item.size * fx.size, fx.life);
+      if (!emitting) return;
+      // Only the cells within reach of the eye (`EFFECT_REACH`).
+      const reach = new Set<number>();
+      keepCellsOver([eye.x - EFFECT_REACH, -eye.z - EFFECT_REACH, eye.x + EFFECT_REACH, -eye.z + EFFECT_REACH], reach);
+      const near = emitters.size < reach.size ? emitters.keys() : reach.values();
+      for (const cell of near) {
+        if (!reach.has(cell)) continue;
+        for (const e of emitters.get(cell) ?? []) {
+          const { item } = e;
+          if (Math.hypot(item.x - eye.x, e.z - eye.y, -item.y - eye.z) > EFFECT_REACH) continue;
+          const fx = EFFECTS[item.kind as EffectKind];
+          e.owed += fx.rate * (item.intensity ?? 0.5) * Math.max(0.5, item.size / m(2)) * dt;
+          const n = Math.floor(e.owed);
+          if (n <= 0) continue;
+          e.owed -= n;
+          exhaust.burst(item.x, item.y, e.z + item.size * fx.rise, n, fx.puff, item.size * fx.spread, item.size * fx.size, fx.life);
+        }
       }
     },
+    warm: () => warmMeshes(stores),
     dispose() {
-      for (const mesh of meshes) mesh.dispose();
+      runs.dispose();
+      drawn.clear();
+      emitters.clear();
     },
   };
 }

@@ -137,7 +137,7 @@ import { clearingIndex } from '@world/trees';
 import { isCoverKind } from '@world/terrainPaint';
 import { buildNatureForest, loadNatureTrees, type NatureTreeKit } from './natureTrees';
 import { createFogField, createFogTexture, type FogLayer } from './fogLayer';
-import { buildElementLayer, loadElementKit, type ElementKit, type ElementLayer } from './elements';
+import { createElementLayer, loadElementKit, type ElementKit, type ElementLayer } from './elements';
 
 /** The scene renderer. ## The rebuild contract Everything derived from the road network or the terrain is rebuilt in */
 
@@ -832,8 +832,9 @@ export function createSceneRenderer(
   /** The elements laid with the brush (`elements.ts`): their models, loaded once, and the layer built for the map. */
   let elementKit: ElementKit | null = null;
   let elementLayer: ElementLayer | null = null;
-  let elementsFor = '';
-  void loadElementKit(anisotropy).then((kit) => { elementKit = kit; elementsFor = ''; }, (error: unknown) => {
+  /** What the elements follow in the diary: they themselves, and the land and the ground under them. */
+  const elementRead = new JournalCursor(['elements', 'terrain', 'ground']);
+  void loadElementKit(anisotropy).then((kit) => { elementKit = kit; }, (error: unknown) => {
     console.warn('[elements] models not loaded', error);
   });
   /** The weather drawn (`world/weather.ts`) */
@@ -860,10 +861,9 @@ export function createSceneRenderer(
   let fogLayer: FogLayer | null = null;
   const fogField = createFogField(fogTexture);
   /** What the fog map follows in the diary, and how far it was read. */
-  const FOG_KINDS: readonly ChangeKind[] = ['fog', 'terrain', 'ground'];
-  let fogJournal: ChangeJournal | null = null;
-  let fogSeen = -1;
-  let fogTerrainSeen = -1;
+  const fogRead = new JournalCursor(['fog', 'terrain', 'ground']);
+  /** A brush stroke that moved the land is held: the fog and the elements wait for its end. */
+  let landStroke = false;
   let fogMoving = false;
   /** Clouds placed on the map: they boil, so the frame is drawn now and then. */
   let placedCloudsShown = false;
@@ -2166,6 +2166,7 @@ export function createSceneRenderer(
       const terrainStarted = performance.now();
       const stroking = !!options?.holdRoads && !!elevation && networkRevision === net.revision;
       const groundMoved = terrain.update(net.doc, stroking);
+      landStroke = !!options?.holdRoads && (landStroke || groundMoved);
       if (groundMoved) {
         landVersion++;
         // The stroke's dirty region, dab by dab (`landDirty`).
@@ -2674,40 +2675,40 @@ export function createSceneRenderer(
         // The painted fog: its map again when the fog or the land under it changed (never in the middle of a sculpting stroke).
         const doc = net.doc;
         // A fog stroke shows as it is painted; a land stroke waits for its end.
-        const landHeld = !!options?.holdRoads && fogTerrainSeen !== doc.terrainRevision;
-        const fogSerial = doc.changes.serialOf(...FOG_KINDS);
-        if ((fogJournal !== doc.changes || fogSerial !== fogSeen) && !landHeld) {
-          const startedAt = performance.now();
-          // Only where the fog, the land or the ground under it changed (`createFogField`)
-          const entries = fogJournal === doc.changes && fogSeen >= 0 ? doc.changes.since(fogSeen, FOG_KINDS) : null;
-          const ground = (x: number, y: number): number => terrain.renderedHeightAt(x, y);
-          const laid = !entries || entries.some((e) => e.rects === null)
-            ? fogField.whole(doc.fogDabs, ground)
-            : fogField.update(doc.fogDabs, ground, entries.flatMap((e) => e.rects!));
-          fogLayer = laid.any ? laid : null;
-          fogJournal = doc.changes;
-          fogSeen = fogSerial;
-          fogTerrainSeen = doc.terrainRevision;
-          performance.measure('hitch:fog', { start: startedAt, end: performance.now() });
+        if (!landStroke) {
+          const entries = fogRead.read(doc.changes);
+          if (entries === null || entries.length > 0) {
+            const startedAt = performance.now();
+            // Only where the fog, the land or the ground under it changed (`createFogField`)
+            const ground = (x: number, y: number): number => terrain.renderedHeightAt(x, y);
+            const laid = !entries || entries.some((e) => e.rects === null)
+              ? fogField.whole(doc.fogDabs, ground)
+              : fogField.update(doc.fogDabs, ground, entries.flatMap((e) => e.rects!));
+            fogLayer = laid.any ? laid : null;
+            performance.measure('hitch:fog', { start: startedAt, end: performance.now() });
+          }
         }
         const f = doc.fogSettings;
         post.setPlacedClouds(doc.clouds);
-        // The elements: again when they or the land under them change.
-        const elementKey = `${doc.elementRevision}:${doc.terrainRevision}`;
-        if (elementKit && elementKey !== elementsFor && !landHeld) {
-          elementsFor = elementKey;
-          if (elementLayer) {
-            for (const mesh of elementLayer.meshes) world.remove(mesh);
-            elementLayer.dispose();
-            elementLayer = null;
+        // The elements: the cells where they or the ground under them changed, from the diary (`elements.ts`).
+        if (elementKit && !landStroke) {
+          if (!elementLayer) {
+            elementLayer = createElementLayer(elementKit);
+            world.add(elementLayer.group);
+            elementRead.reset();
           }
-          const startedAt = performance.now();
-          if (doc.elements.length > 0) {
-            elementLayer = buildElementLayer(doc.elements, elementKit, (x, y) => terrain.renderedHeightAt(x, y));
-            for (const mesh of elementLayer.meshes) world.add(mesh);
+          const entries = elementRead.read(doc.changes);
+          if (entries === null || entries.length > 0) {
+            const startedAt = performance.now();
+            const items: ChangeRect[] = [], ground: ChangeRect[] = [];
+            const whole = entries === null || entries.some((e) => e.rects === null);
+            if (!whole) for (const e of entries) (e.kind === 'elements' ? items : ground).push(...e.rects!);
+            elementLayer.sync(whole ? { items: null, ground: null } : { items, ground }, doc, terrain.renderedHeightAt);
+            performance.measure('hitch:elements', { start: startedAt, end: performance.now() });
           }
-          performance.measure('hitch:elements', { start: startedAt, end: performance.now() });
         }
+        // In the frame they changed in, as the other layers were culled above.
+        elementLayer?.cull(crowdFrustum, crowdProjection);
         elementLayer?.emit(Math.min(0.1, Math.max(0, delta)), rig.camera.position, exhaust);
         post.setGroundFog(fogLayer?.any ? { texture: fogLayer.texture, low: fogLayer.low, high: fogLayer.high, density: f.density } : null);
         fogMoving = !!fogLayer?.any;
