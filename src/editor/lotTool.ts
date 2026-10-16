@@ -11,6 +11,7 @@ import { solidFootprints } from '@world/buildings/geometry';
 import type { BuildingId } from '@world/buildings/types';
 import { JournalCursor } from '@world/derived';
 import { LotStore } from '@world/lotStore';
+import { ORDER_DRAWN, ORDER_LINES, ORDER_LOT_LINES, ORDER_LOT_POINTS, ORDER_POINTS, ORDER_PROPOSED, PartLog, type LotOverlay, type LotPart } from './lotParts';
 import { m } from '@world/units';
 import { nearestRibbon } from '@world/nearestRibbon';
 import type { ZoneDensity, ZoneUse } from '@world/zones';
@@ -40,16 +41,6 @@ export interface LotToolHost {
   mutate(fn: () => boolean): void;
   hint(key: string): void;
   redraw(): void;
-}
-
-/** What the scene draws of the lots (the shape of `render/lotOverlay.ts` `LotOverlayInput`, without its key). */
-export interface LotOverlay {
-  /** `built`: a lot with a building, whose yard's paving is coloured too. */
-  readonly polygons: { corners: readonly Vec2[]; fill: number | null; fillAlpha: number; line: number; lineAlpha: number; width: number; built?: boolean }[];
-  readonly lines: { a: Vec2; b: Vec2; colour: number; dashed: boolean; width: number }[];
-  readonly points: { p: Vec2; colour: number; radius: number }[];
-  /** Labels for the 2D layer: a lot's size, a side's length. */
-  readonly labels: { at: Vec2; kind: 'size'; width: number; depth: number }[] | { at: Vec2; kind: 'length'; length: number }[];
 }
 
 const ZONE_COLOURS: Readonly<Record<ZoneUse, number>> = { residential: 0x56bb73, commercial: 0x5da9e9, industrial: 0xd9b254 };
@@ -84,8 +75,6 @@ export class LotTool {
 
   constructor(private readonly host: LotToolHost) {}
 
-  /** The overlay with the other tools and the lots and buildings it was made from (`overlayKeyed`). */
-  private quiet: { key: string; overlay: LotOverlay & { readonly key: string } } | null = null;
   /** The zoned lots by id, kept by the diary's entries of the lots (`anyZoned`). */
   private readonly zonedIds = new Set<number>();
   private readonly zonedCursor = LotStore.cursor();
@@ -104,59 +93,210 @@ export class LotTool {
     for (const l of this.doc.lotStore.all()) if (l.use) this.zonedIds.add(l.id);
   }
 
-  /** `overlay` with the key the scene compares (`render/lotOverlay.ts`). */
-  overlayKeyed(editing: boolean): LotOverlay & { readonly key: string } {
-    const gesture = this.polygon.length > 0 || this.drawn !== null || this.cutLine !== null || this.curve !== null;
-    if (!editing && !gesture) {
-      const key = `lots ${this.doc.lotRevision} ${this.doc.buildings.revision}`;
-      if (this.quiet?.key === key) return this.quiet.overlay;
-      // A faint hint, not the tool: held while a city grows lot by lot
-      if (this.quiet && this.held) return this.quiet.overlay;
-      return this.remakeQuiet(key);
-    }
-    // In the tool, what is under the pointer changes the drawing: it is made again when the state it is drawn from changed
+  /** What is drawn of the lots, in parts (`PartLog`). */
+  private readonly drawing = new PartLog();
+  /** What every lot's part is drawn with (the tool in hand or not, its mode, its zone, the eraser): all drawn again when it changes. */
+  private drawnWith: string | null = null;
+  /** The diary of the lots by id and of the buildings by place: the lots drawn again are those they name. */
+  private readonly drawnLots = LotStore.cursor();
+  private readonly drawnBuildings = new JournalCursor(['buildings']);
+  /** The lots, and the proposed lots, the gesture marks (painted, under the pointer, picked, a corner dragged), with their mark. */
+  private marked = new Map<number, string>();
+  private markedProposed = new Map<number, string>();
+  /** The proposed lots drawn, as the proposal held them, or null; and whether they are all drawn again (`overlayFor`). */
+  private proposedDrawn: readonly Vec2[][] | null = null;
+  private proposedAgain = false;
+  /** The gesture's part as last drawn: its shapes, written out (a few dozen numbers). */
+  private gestureKey = '';
+
+  /** DO NOT draw every lot again for a move of the pointer or a lot changed: the parts of the lots the diary or the gesture changed */
+  overlayFor(editing: boolean): LotOverlay {
+    const { doc, drawing } = this;
+    const settings = this.host.settings();
     if (editing && this.advanceProposal()) this.host.redraw();
-    const key = this.liveKey(editing);
-    if (this.live?.key === key) return this.live.overlay;
-    const overlay = { ...this.overlay(editing), key };
-    this.live = { key, overlay };
-    return overlay;
+    const hoverLot = editing && this.hover ? this.lotAt(this.hover) : undefined;
+    const view = { editing, settings, hoverLot, corner: this.corner };
+    const lots = doc.lotStore.changedFor(this.drawnLots);
+    const buildings = this.drawnBuildings.read(doc.changes);
+    const with_ = `${editing ? 'e' : 'q'}|${settings.mode}|${settings.use}|${settings.eraser ? 1 : 0}`;
+    const marked = this.marks(view);
+    if (with_ !== this.drawnWith || lots === null || buildings === null || buildings.some((e) => e.rects === null)) {
+      // @rebuild Every lot drawn again: the tool taken up or put down, its mode changed, a load.
+      this.drawnWith = with_;
+      for (const id of [...drawing.parts.keys()]) if (id.startsWith('l') && !doc.lot(Number(id.slice(1)))) drawing.put(id, null);
+      for (const l of doc.lotStore.all()) drawing.put(`l${l.id}`, this.lotPart(l, view));
+      this.proposedAgain = true;
+    } else {
+      const ids = new Set(lots);
+      for (const e of buildings) for (const r of e.rects!) for (const l of doc.lotsIn(r)) ids.add(l.id);
+      for (const [id, mark] of this.marked) if (marked.get(id) !== mark) ids.add(id);
+      for (const id of marked.keys()) if (!this.marked.has(id)) ids.add(id);
+      for (const id of ids) { const l = doc.lot(id); drawing.put(`l${id}`, l ? this.lotPart(l, view) : null); }
+    }
+    this.marked = marked;
+    this.drawProposed(view);
+    this.drawGesture(view);
+    drawing.labels = this.labelsFor(view);
+    return drawing;
   }
 
-  /** The overlay of the last gesture frame and the state it was made from (`overlayKeyed`). */
-  private live: { key: string; overlay: LotOverlay & { readonly key: string } } | null = null;
-  /** The diary read for the lots and buildings (`liveKey`): a count of the times it said something changed. */
-  private readonly liveCursor = new JournalCursor(['lots', 'buildings']);
-  private liveEdits = 0;
+  /** The lots the gesture marks, each with its mark: what of it the gesture changes. */
+  private marks(view: { readonly editing: boolean; readonly hoverLot: Lot | undefined; readonly corner: LotTool['corner'] }): Map<number, string> {
+    const out = new Map<number, string>();
+    const mark = (id: number, m: string): void => { out.set(id, (out.get(id) ?? '') + m); };
+    if (this.stroke) for (const id of this.stroke.ids) mark(id, this.stroke.remove ? 'r' : 'a');
+    if (view.hoverLot) mark(view.hoverLot.id, 'h');
+    if (view.editing && this.joinFirst !== null) mark(this.joinFirst, 'j');
+    const corner = view.corner;
+    if (corner) {
+      for (const l of this.lotsNear(corner.from, m(0.8))) {
+        if (l.corners.some((q) => Math.hypot(q.x - corner.from.x, q.y - corner.from.y) < m(0.8))) mark(l.id, `c${corner.to.x},${corner.to.y}`);
+      }
+    }
+    return out;
+  }
 
-  /** DO NOT build the overlay and write it out as JSON to compare it */
-  private liveKey(editing: boolean): string {
-    const at = (q: Vec2 | null): string => (q ? `${q.x},${q.y}` : '-');
+  /** A lot as the scene draws it: its outline and fill, in the tool its front and the arrow to the street, its corners in edit mode. */
+  private lotPart(l: Lot, view: { readonly editing: boolean; readonly settings: ReturnType<LotToolHost['settings']>; readonly hoverLot: Lot | undefined; readonly corner: LotTool['corner'] }): LotPart | null {
+    const { doc } = this;
+    const { editing, settings, hoverLot, corner } = view;
+    const built = l.building !== undefined && doc.buildings.has(l.building as BuildingId);
+    if (!editing && (!l.use || built)) return null;
+    const dragged = (q: Vec2): Vec2 => corner && Math.hypot(q.x - corner.from.x, q.y - corner.from.y) < m(0.8) ? corner.to : q;
+    const order = doc.lotStore.orderOf(l.id)!;
+    const painting = this.stroke?.ids.has(l.id);
+    const hovered = l.id === hoverLot?.id;
+    const brushHover = hovered && settings.mode === 'brush';
+    const picked = editing && (l.id === this.joinFirst || (hovered && !brushHover && settings.mode !== 'edit'));
+    const fill = painting ? (this.stroke!.remove ? 0xe36c60 : ZONE_COLOURS[settings.use]) : l.use ? ZONE_COLOURS[l.use] : brushHover ? (settings.eraser ? 0xe36c60 : ZONE_COLOURS[settings.use]) : null;
+    const fillAlpha = painting ? 0.6 : l.use ? (editing ? (built ? 0.22 : 0.45) : 0.25) : brushHover ? 0.35 : 0;
+    const polygons: LotPart['polygons'] = [{ corners: l.corners.map(dragged), fill, fillAlpha,
+      line: picked ? (settings.mode === 'delete' ? 0xff6b5e : 0xffd25e) : 0xffffff, lineAlpha: editing ? (picked ? 1 : 0.85) : 0,
+      width: picked ? 0.7 : 0.35, order, ...(built ? { built: true } : {}) }];
+    const lines: LotPart['lines'][number][] = [];
+    const points: LotPart['points'][number][] = [];
+    if (editing && settings.mode === 'edit') l.corners.forEach((q, c) => points.push({ p: dragged(q), colour: 0xffffff, radius: 0.6, order: ORDER_LOT_POINTS + order + c / 4096 }));
+    // The lot's front, the side its building faces: marked in the Zoning tool.
+    if (editing && l.corners.length > 1) {
+      const a = dragged(l.corners[0]!), b = dragged(l.corners[1]!);
+      const at = ORDER_LOT_LINES + order * 4;
+      lines.push({ a, b, colour: 0x5ee0ff, dashed: false, width: 0.8, order: at });
+      // An arrow from inside the lot out through the middle of its front, towards the street.
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      if (len >= m(2)) {
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const centre = lotCentre(l);
+        let nx = -(b.y - a.y) / len, ny = (b.x - a.x) / len;
+        if ((mid.x - centre.x) * nx + (mid.y - centre.y) * ny < 0) { nx = -nx; ny = -ny; }
+        const size = Math.min(m(7), len * 0.35, Math.max(m(2), Math.hypot(mid.x - centre.x, mid.y - centre.y) * 0.6));
+        const tail = { x: mid.x - nx * size, y: mid.y - ny * size };
+        const tip = { x: mid.x - nx * size * 0.15, y: mid.y - ny * size * 0.15 };
+        const head = size * 0.4, tx = -ny, ty = nx;
+        lines.push({ a: tail, b: tip, colour: 0x5ee0ff, dashed: false, width: 1, order: at + 1 });
+        lines.push({ a: tip, b: { x: tip.x - nx * head + tx * head * 0.7, y: tip.y - ny * head + ty * head * 0.7 }, colour: 0x5ee0ff, dashed: false, width: 1, order: at + 2 });
+        lines.push({ a: tip, b: { x: tip.x - nx * head - tx * head * 0.7, y: tip.y - ny * head - ty * head * 0.7 }, colour: 0x5ee0ff, dashed: false, width: 1, order: at + 3 });
+      }
+    }
+    return { polygons, lines, points };
+  }
+
+  /** The street land proposed as lots, in every mode of the tool: faint outlines, the ones the brush passed or is over filled. */
+  private drawProposed(view: { readonly editing: boolean; readonly settings: ReturnType<LotToolHost['settings']>; readonly hoverLot: Lot | undefined }): void {
+    const { drawing } = this;
+    const { editing, settings, hoverLot } = view;
     const prop = this.proposal;
-    const proposal = prop ? `${prop.key}/${prop.steps ? 'w' : 'r'}/${prop.lots.length}/${prop.keys.length}` : '-';
-    const stroke = this.stroke ? `${this.stroke.remove ? 'r' : 'a'}${this.stroke.ids.size}/${this.stroke.fresh.size}` : '-';
-    const corner = this.corner ? `${at(this.corner.from)}>${at(this.corner.to)}` : '-';
-    const drawn = this.drawn ? `${at(this.drawn.a)}>${at(this.drawn.b)}@${this.drawn.angle}` : '-';
-    const cut = this.cutLine ? `${at(this.cutLine.a)}>${at(this.cutLine.b)}` : '-';
-    const curve = this.curve ? `${at(this.curve.a)}>${at(this.curve.b)}~${at(this.curve.through)}` : '-';
-    const polygon = this.polygon.map(at).join(';');
-    const changed = this.liveCursor.read(this.doc.changes);
-    if (changed === null || changed.length > 0) this.liveEdits++;
-    return [editing ? 'e' : 'q', this.liveEdits, JSON.stringify(this.host.settings()),
-      at(this.hover), this.hover ? this.host.zoom() : 0, this.joinFirst ?? '-', stroke, corner, drawn, cut, curve, polygon, proposal].join('|');
+    const shown = editing && prop && !prop.steps && prop.key === this.proposalKey() ? prop.lots : null;
+    const hoverAt = shown && this.hover && !hoverLot && settings.mode === 'brush' ? this.proposedAt(this.hover) : -1;
+    const marked = new Map<number, string>();
+    if (shown) {
+      for (const k of this.stroke?.fresh ?? []) marked.set(k, 'f');
+      if (hoverAt >= 0) marked.set(hoverAt, (marked.get(hoverAt) ?? '') + 'h');
+    }
+    const part = (k: number): LotPart => {
+      const painting = this.stroke?.fresh.has(k);
+      const lit = k === hoverAt;
+      return { polygons: [{ corners: shown![k]!, fill: painting || lit ? (settings.eraser ? null : ZONE_COLOURS[settings.use]) : null,
+        fillAlpha: painting ? 0.6 : lit ? 0.35 : 0, line: 0xffffff, lineAlpha: lit || painting ? 0.85 : 0.35, width: 0.25, order: ORDER_PROPOSED + k }], lines: [], points: [] };
+    };
+    if (shown !== this.proposedDrawn || this.proposedAgain) {
+      // A proposal worked out again is a new plan of the whole street land: its lots all drawn anew.
+      for (let k = shown?.length ?? 0; k < (this.proposedDrawn?.length ?? 0); k++) drawing.put(`p${k}`, null);
+      if (shown) for (let k = 0; k < shown.length; k++) drawing.put(`p${k}`, part(k));
+      this.proposedDrawn = shown;
+      this.proposedAgain = false;
+    } else if (shown) {
+      for (const [k, mark] of this.markedProposed) if (marked.get(k) !== mark && k < shown.length) drawing.put(`p${k}`, part(k));
+      for (const k of marked.keys()) if (!this.markedProposed.has(k) && k < shown.length) drawing.put(`p${k}`, part(k));
+    }
+    this.markedProposed = marked;
   }
 
-  /** @rebuild Called when the lots or the buildings changed (`overlayKeyed`). */
-  private remakeQuiet(key: string): LotOverlay & { readonly key: string } {
-    const overlay = { ...this.overlay(false), key };
-    this.quiet = { key, overlay };
-    return overlay;
+  /** What the gesture draws besides the lots: a side picked, the cuts, a curve, a polygon, the snap, the lot being drawn. */
+  private drawGesture(view: { readonly editing: boolean; readonly settings: ReturnType<LotToolHost['settings']>; readonly hoverLot: Lot | undefined; readonly corner: LotTool['corner'] }): void {
+    const { editing, settings, hoverLot, corner } = view;
+    const polygons: LotPart['polygons'][number][] = [];
+    const lines: LotPart['lines'][number][] = [];
+    const points: LotPart['points'][number][] = [];
+    const line = (a: Vec2, b: Vec2, colour: number, dashed: boolean, width: number): void => { lines.push({ a, b, colour, dashed, width, order: ORDER_LINES + lines.length }); };
+    const point = (p: Vec2, colour: number, radius: number): void => { points.push({ p, colour, radius, order: ORDER_POINTS + points.length }); };
+    if (editing && settings.mode === 'front' && this.hover) {
+      const side = this.sideAt(this.hover);
+      if (side) line(side.a, side.b, 0xffd25e, false, 1);
+    }
+    if (editing && settings.mode === 'split' && settings.splitKind !== 'line' && hoverLot) {
+      for (const [a, b] of cutLines(hoverLot, { kind: settings.splitKind, parts: settings.splitParts })) line(a, b, 0xffd25e, true, 0.5);
+    }
+    if (this.cutLine) line(this.cutLine.a, this.cutLine.b, 0xffd25e, true, 0.5);
+    if (this.curve) {
+      const { a, b, through } = this.curve;
+      const c = { x: 2 * through.x - (a.x + b.x) / 2, y: 2 * through.y - (a.y + b.y) / 2 };
+      let prev = a;
+      for (let k = 1; k <= 16; k++) {
+        const t = k / 16, s1 = 1 - t;
+        const q = { x: s1 * s1 * a.x + 2 * s1 * t * c.x + t * t * b.x, y: s1 * s1 * a.y + 2 * s1 * t * c.y + t * t * b.y };
+        line(prev, q, 0xffd25e, false, 0.6);
+        prev = q;
+      }
+    }
+    if (editing && settings.mode === 'curve' && !this.curve && this.hover) {
+      const side = this.sideNear(this.hover);
+      if (side) line(side.a, side.b, 0xffd25e, false, 0.7);
+    }
+    if (this.polygon.length) {
+      const pts = [...this.polygon, ...(this.hover ? [this.snap(this.hover)] : [])];
+      for (let i = 1; i < pts.length; i++) line(pts[i - 1]!, pts[i]!, 0xffffff, false, 0.5);
+      for (const q of this.polygon) point(q, 0xffffff, 0.6);
+    }
+    if (editing && (settings.mode === 'polygon' || settings.mode === 'add' || corner) && this.hover) {
+      point(corner ? corner.to : this.snap(this.hover), 0x5ee0ff, 0.9);
+    }
+    if (this.drawn) {
+      // As it will be made: cut back to the footways.
+      const rect = lotRect(this.drawn.a, this.drawn.b, this.drawn.angle);
+      const cut = rect ? onLand(this.net, rect) : null;
+      if (cut) polygons.push({ corners: cut, fill: 0xffffff, fillAlpha: 0.2, line: 0xffffff, lineAlpha: 1, width: 0.5, order: ORDER_DRAWN });
+    }
+    // Written out to see whether it changed: a few dozen numbers, not the lots.
+    const at = (q: Vec2): string => `${q.x},${q.y}`;
+    const key = [...polygons.map((p) => p.corners.map(at).join(';')), ...lines.map((l) => `${at(l.a)}>${at(l.b)}${l.colour}${l.dashed ? 'd' : ''}${l.width}`),
+      ...points.map((p) => `${at(p.p)}${p.colour}${p.radius}`)].join('|');
+    if (key === this.gestureKey) return;
+    this.gestureKey = key;
+    this.drawing.put('g', key ? { polygons, lines, points } : null);
   }
-  /** Whether the quiet overlay is held as it is while lots keep changing (`holdOverlay`). */
-  private held = false;
-  /** Holds the quiet overlay as it is (a city growing, a lot a slice); released, the next frame lays it again. */
-  holdOverlay(on: boolean): void {
-    this.held = on;
+
+  /** The 2D layer's labels: the size of the lot under the pointer, the length of the side being drawn. */
+  private labelsFor(view: { readonly editing: boolean; readonly hoverLot: Lot | undefined }): LotOverlay['labels'] {
+    const { editing, hoverLot } = view;
+    if (editing && hoverLot && !this.polygon.length) {
+      const f = lotFrame(hoverLot);
+      return [{ at: lotCentre(hoverLot), kind: 'size', width: f.width, depth: f.depth }];
+    }
+    if (this.polygon.length && this.hover) {
+      const a = this.polygon[this.polygon.length - 1]!, b = this.snap(this.hover);
+      return [{ at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, kind: 'length', length: Math.hypot(b.x - a.x, b.y - a.y) }];
+    }
+    return [];
   }
 
   private get doc(): RoadDoc { return this.host.doc; }
@@ -606,111 +746,6 @@ export class LotTool {
     }
   }
 
-  // ------------------------------------------------------------ drawing
-
-  /** The lots as the scene draws them: in the Zoning tool */
-  overlay(editing: boolean): LotOverlay {
-    const { doc } = this;
-    const settings = this.host.settings();
-    const hoverLot = editing && this.hover ? this.lotAt(this.hover) : undefined;
-    const corner = this.corner;
-    const dragged = (q: Vec2): Vec2 => corner && Math.hypot(q.x - corner.from.x, q.y - corner.from.y) < m(0.8) ? corner.to : q;
-    const polygons: LotOverlay['polygons'] = [];
-    const lines: LotOverlay['lines'] = [];
-    const points: LotOverlay['points'] = [];
-    for (const l of doc.lots) {
-      const built = l.building !== undefined && doc.buildings.has(l.building as BuildingId);
-      if (!editing && (!l.use || built)) continue;
-      const painting = this.stroke?.ids.has(l.id);
-      const brushHover = l === hoverLot && settings.mode === 'brush';
-      const picked = editing && (l.id === this.joinFirst || (l === hoverLot && !brushHover && settings.mode !== 'edit'));
-      const fill = painting ? (this.stroke!.remove ? 0xe36c60 : ZONE_COLOURS[settings.use]) : l.use ? ZONE_COLOURS[l.use] : brushHover ? (settings.eraser ? 0xe36c60 : ZONE_COLOURS[settings.use]) : null;
-      const fillAlpha = painting ? 0.6 : l.use ? (editing ? (built ? 0.22 : 0.45) : 0.25) : brushHover ? 0.35 : 0;
-      polygons.push({ corners: l.corners.map(dragged), fill, fillAlpha,
-        line: picked ? (settings.mode === 'delete' ? 0xff6b5e : 0xffd25e) : 0xffffff, lineAlpha: editing ? (picked ? 1 : 0.85) : 0,
-        width: picked ? 0.7 : 0.35, ...(built ? { built: true } : {}) });
-    }
-    // The street land proposed as lots, in every mode of the tool (they vanished from the Lots modes): faint outlines
-    if (editing) {
-      if (this.advanceProposal()) this.host.redraw();
-      const prop = this.proposal;
-      if (prop && !prop.steps && prop.key === this.proposalKey()) {
-        const hoverAt = this.hover && !hoverLot && settings.mode === 'brush' ? this.proposedAt(this.hover) : -1;
-        prop.lots.forEach((corners, k) => {
-          const painting = this.stroke?.fresh.has(k);
-          const lit = k === hoverAt;
-          polygons.push({ corners, fill: painting || lit ? (settings.eraser ? null : ZONE_COLOURS[settings.use]) : null,
-            fillAlpha: painting ? 0.6 : lit ? 0.35 : 0, line: 0xffffff, lineAlpha: lit || painting ? 0.85 : 0.35, width: 0.25 });
-        });
-      }
-    }
-    if (editing && settings.mode === 'edit') for (const l of doc.lots) for (const q of l.corners) points.push({ p: dragged(q), colour: 0xffffff, radius: 0.6 });
-    // Each lot's front, the side its building faces: marked in the Zoning tool.
-    if (editing) for (const l of doc.lots) if (l.corners.length > 1) {
-      const a = dragged(l.corners[0]!), b = dragged(l.corners[1]!);
-      lines.push({ a, b, colour: 0x5ee0ff, dashed: false, width: 0.8 });
-      // An arrow from inside the lot out through the middle of its front, towards the street.
-      const len = Math.hypot(b.x - a.x, b.y - a.y);
-      if (len < m(2)) continue;
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      const centre = lotCentre(l);
-      let nx = -(b.y - a.y) / len, ny = (b.x - a.x) / len;
-      if ((mid.x - centre.x) * nx + (mid.y - centre.y) * ny < 0) { nx = -nx; ny = -ny; }
-      const size = Math.min(m(7), len * 0.35, Math.max(m(2), Math.hypot(mid.x - centre.x, mid.y - centre.y) * 0.6));
-      const tail = { x: mid.x - nx * size, y: mid.y - ny * size };
-      const tip = { x: mid.x - nx * size * 0.15, y: mid.y - ny * size * 0.15 };
-      const head = size * 0.4, tx = -ny, ty = nx;
-      lines.push({ a: tail, b: tip, colour: 0x5ee0ff, dashed: false, width: 1 });
-      lines.push({ a: tip, b: { x: tip.x - nx * head + tx * head * 0.7, y: tip.y - ny * head + ty * head * 0.7 }, colour: 0x5ee0ff, dashed: false, width: 1 });
-      lines.push({ a: tip, b: { x: tip.x - nx * head - tx * head * 0.7, y: tip.y - ny * head - ty * head * 0.7 }, colour: 0x5ee0ff, dashed: false, width: 1 });
-    }
-    if (editing && settings.mode === 'front' && this.hover) {
-      const side = this.sideAt(this.hover);
-      if (side) lines.push({ a: side.a, b: side.b, colour: 0xffd25e, dashed: false, width: 1 });
-    }
-    if (editing && settings.mode === 'split' && settings.splitKind !== 'line' && hoverLot) {
-      for (const [a, b] of cutLines(hoverLot, { kind: settings.splitKind, parts: settings.splitParts })) lines.push({ a, b, colour: 0xffd25e, dashed: true, width: 0.5 });
-    }
-    if (this.cutLine) lines.push({ a: this.cutLine.a, b: this.cutLine.b, colour: 0xffd25e, dashed: true, width: 0.5 });
-    if (this.curve) {
-      const { a, b, through } = this.curve;
-      const c = { x: 2 * through.x - (a.x + b.x) / 2, y: 2 * through.y - (a.y + b.y) / 2 };
-      let prev = a;
-      for (let k = 1; k <= 16; k++) {
-        const t = k / 16, s1 = 1 - t;
-        const q = { x: s1 * s1 * a.x + 2 * s1 * t * c.x + t * t * b.x, y: s1 * s1 * a.y + 2 * s1 * t * c.y + t * t * b.y };
-        lines.push({ a: prev, b: q, colour: 0xffd25e, dashed: false, width: 0.6 });
-        prev = q;
-      }
-    }
-    if (editing && settings.mode === 'curve' && !this.curve && this.hover) {
-      const side = this.sideNear(this.hover);
-      if (side) lines.push({ a: side.a, b: side.b, colour: 0xffd25e, dashed: false, width: 0.7 });
-    }
-    if (this.polygon.length) {
-      const pts = [...this.polygon, ...(this.hover ? [this.snap(this.hover)] : [])];
-      for (let i = 1; i < pts.length; i++) lines.push({ a: pts[i - 1]!, b: pts[i]!, colour: 0xffffff, dashed: false, width: 0.5 });
-      for (const q of this.polygon) points.push({ p: q, colour: 0xffffff, radius: 0.6 });
-    }
-    if (editing && (settings.mode === 'polygon' || settings.mode === 'add' || corner) && this.hover) {
-      points.push({ p: corner ? corner.to : this.snap(this.hover), colour: 0x5ee0ff, radius: 0.9 });
-    }
-    if (this.drawn) {
-      // As it will be made: cut back to the footways.
-      const rect = lotRect(this.drawn.a, this.drawn.b, this.drawn.angle);
-      const cut = rect ? onLand(this.net, rect) : null;
-      if (cut) polygons.push({ corners: cut, fill: 0xffffff, fillAlpha: 0.2, line: 0xffffff, lineAlpha: 1, width: 0.5 });
-    }
-    let labels: LotOverlay['labels'] = [];
-    if (editing && hoverLot && !this.polygon.length) {
-      const f = lotFrame(hoverLot);
-      labels = [{ at: lotCentre(hoverLot), kind: 'size', width: f.width, depth: f.depth }];
-    } else if (this.polygon.length && this.hover) {
-      const a = this.polygon[this.polygon.length - 1]!, b = this.snap(this.hover);
-      labels = [{ at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, kind: 'length', length: Math.hypot(b.x - a.x, b.y - a.y) }];
-    }
-    return { polygons, lines, points, labels };
-  }
 }
 
 /** Whether the segment a-b passes through the inside of a lot. */
