@@ -5,14 +5,14 @@ export { coarseArrays, type BlockArrays } from './roadLodPure';
 
 /** DO NOT draw a far block at full detail: nothing there is resolved. */
 
-/** A coarse block's geometry from its arrays. */
-export function coarseGeometry(arrays: BlockArrays): BufferGeometry {
+/** A block's geometry from its arrays, full or coarse: `color` and `roadSection` only where they were made. */
+export function blockGeometry(arrays: BlockArrays): BufferGeometry {
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(arrays.position, 3));
   geometry.setAttribute('normal', new BufferAttribute(arrays.normal, 3));
   geometry.setAttribute('uv', new BufferAttribute(arrays.uv, 2));
-  geometry.setAttribute('color', new BufferAttribute(arrays.color, 3));
-  geometry.setAttribute('roadSection', new BufferAttribute(arrays.roadSection, 3));
+  if (arrays.color) geometry.setAttribute('color', new BufferAttribute(arrays.color, 3));
+  if (arrays.roadSection) geometry.setAttribute('roadSection', new BufferAttribute(arrays.roadSection, 3));
   geometry.setIndex(new BufferAttribute(arrays.index, 1));
   return geometry;
 }

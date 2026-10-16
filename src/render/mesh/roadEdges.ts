@@ -1,7 +1,16 @@
-import type { MeshStandardMaterial } from 'three';
+import type { Material, MeshStandardMaterial } from 'three';
+import type { VertexReads } from './roadLodPure';
+
+/** The mark on a material whose shader reads the `roadSection` attribute (`applyRoadEdges`). */
+const READS_SECTION = 'readsRoadSection';
+
+/** The per-vertex attributes a road surface's material reads, from the material itself: its declaration, never kept apart. */
+export const vertexReadsOf = (material: Material): VertexReads =>
+  ({ color: material.vertexColors, roadSection: material.userData[READS_SECTION] === true });
 
 /** WHERE A STREET IS DIRTY AND WHERE IT IS WORN */
 export function applyRoadEdges(material: MeshStandardMaterial, kind: 'carriageway' | 'footway'): void {
+  material.userData[READS_SECTION] = true;
   const before = material.onBeforeCompile;
   const key = material.customProgramCacheKey;
   material.onBeforeCompile = (shader, renderer) => {

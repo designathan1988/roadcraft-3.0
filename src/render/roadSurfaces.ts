@@ -20,6 +20,8 @@ import { TERRAIN_CELL } from './terrain';
 import { attachFarLevel, cloneBlock, mergeTiles, tilesOnGpu } from './mesh/surfaceTiles';
 import { cancelWarm, warmLooseAhead } from './uploads';
 import { levelsOf } from './mesh/roadLod';
+import type { VertexReads } from './mesh/roadLodPure';
+import { vertexReadsOf } from './mesh/roadEdges';
 import { type TilePolys, type TileSource, tileShapes } from './roadTileShape';
 import type { RoadTiler, TileJob } from './roadTilePool';
 import type { SurfaceData } from './roadTileMesh';
@@ -174,6 +176,8 @@ interface SurfaceSpec {
   readonly source: Source;
   readonly options: Omit<SurfaceMeshOptions, 'polygons'>;
   readonly renderOrder?: number;
+  /** What its material's shader reads past position, normal and uv: only those go to the GPU (`mergeTiles`). */
+  readonly reads: VertexReads;
 }
 
 /** The road a surface reads beside the field, as a pass sees it (`RoadLook`): its paving, widths and mouths. */
@@ -481,7 +485,7 @@ export function* roadSurfaceSteps(
         if (known && sameTiles(known.parts, list)) {
           mesh = known.mesh;
           // Bound to this build's rings: the build that made it lets go of its own.
-          tilesOnGpu(mesh, source);
+          tilesOnGpu(mesh, spec.reads, source);
           chunksKept++;
         } else {
           if (known) retire(known.mesh);
@@ -490,7 +494,7 @@ export function* roadSurfaceSteps(
           const lock = coarsen ? blockBox(list.map((tile) => tile.rect)) : null;
           const near = lock ? reuse!.near!((lock[0] + lock[2]) / 2, (lock[1] + lock[3]) / 2) : true;
           let started: Mesh | null = null;
-          mesh = mergeTiles(list.map((tile) => tile.bundle!.get(spec.options.name)!), spec.options, source,
+          mesh = mergeTiles(list.map((tile) => tile.bundle!.get(spec.options.name)!), spec.options, spec.reads, source,
             lock ? {
               lock, near,
               start: (block, arrays) => {
@@ -500,7 +504,7 @@ export function* roadSurfaceSteps(
                   // The block may have been built again meanwhile: its far level is of the one it was made for.
                   if (chunks?.get(key)?.mesh !== block) return;
                   if (made) {
-                    const level = attachFarLevel(block, made, spec.options, source, lock, near);
+                    const level = attachFarLevel(block, made, spec.options, spec.reads, source, lock, near);
                     if (!near) void warmLooseAhead([level]);
                   } else if (!near) void warmLooseAhead([block]);
                 }).catch((error: unknown) => {
@@ -571,9 +575,16 @@ function concat(parts: readonly ArrayLike<number>[]): { lineEnds: Uint32Array; l
   return { lineEnds, lines };
 }
 
-/** A surface as the page draws it: what it reads (`passSurfaces`) with its material and shadows. */
+/** A surface as the page draws it: what it reads (`passSurfaces`) with its material and shadows, and what that material reads per vertex. */
 function dress(read: SurfaceRead, raised: boolean, materials: SceneMaterials, groundMaterial: Material | undefined,
   paintFor: (color: string) => Material): SurfaceSpec {
+  const spec = dressed(read, raised, materials, groundMaterial, paintFor);
+  return { ...spec, reads: vertexReadsOf(spec.options.material) };
+}
+
+/** `dress` without the reads. */
+function dressed(read: SurfaceRead, raised: boolean, materials: SceneMaterials, groundMaterial: Material | undefined,
+  paintFor: (color: string) => Material): Omit<SurfaceSpec, 'reads'> {
   const source = read.source;
   if (source.kind === 'paint') {
     return { source, options: { ...read.options, material: paintFor(source.color), receiveShadow: true }, renderOrder: 3 };

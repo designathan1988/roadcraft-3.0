@@ -1,5 +1,5 @@
 import { type MeshAsk, TileMesher, tileBuffers } from './roadTileMesh';
-import { type BlockArrays, coarseArrays } from './mesh/roadLodPure';
+import { type BlockArrays, blockBuffers, coarseArrays } from './mesh/roadLodPure';
 
 /** One worker of the roads' surface tiles (`roadTilePool.ts`): each tile of a share shaped and meshed whole */
 type Message =
@@ -28,7 +28,7 @@ function serve(): (event: MessageEvent<Message>) => void {
       if ('coarse' in data) {
         // A block's far level (`mesh/roadLodPure.ts`): simplified here, handed back with its buffers transferred.
         const made = coarseArrays(data.coarse.arrays, data.coarse.lock);
-        post.postMessage({ id, coarse: made }, made ? [made.position.buffer, made.normal.buffer, made.uv.buffer, made.color.buffer, made.roadSection.buffer, made.index.buffer] as ArrayBuffer[] : []);
+        post.postMessage({ id, coarse: made }, made ? blockBuffers(made) : []);
         return;
       }
       let mesher: TileMesher;

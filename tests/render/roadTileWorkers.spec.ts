@@ -32,7 +32,9 @@ function bytesOf(root: Object3D): string {
     if (!geometry) return;
     meshes++;
     hash.update(object.name);
+    // `color` and `roadSection` only where the material reads them (`mergeTiles`): none on these plain materials.
     for (const name of ['position', 'normal', 'uv', 'color', 'roadSection']) {
+      if (!geometry.getAttribute(name)) { hash.update(`no ${name}`); continue; }
       const array = geometry.getAttribute(name).array as Float32Array;
       hash.update(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
     }

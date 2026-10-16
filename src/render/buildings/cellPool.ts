@@ -147,9 +147,9 @@ export class CellPool {
     if (typeof Worker === 'undefined') { this.broken = true; return null; }
     const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
     const count = Math.max(1, Math.min(MOST_LANES, cores - 1));
+    const lanes: Lane[] = [];
     try {
       const boxes = this.boxes();
-      const lanes: Lane[] = [];
       for (let k = 0; k < count; k++) {
         const worker = new Worker(new URL('./cell.worker.ts', import.meta.url), { type: 'module' });
         const lane: Lane = { worker, jobs: new Map(), queue: [] };
@@ -164,6 +164,8 @@ export class CellPool {
       }
       this.lanes = lanes;
     } catch (error) {
+      // The workers already made end too: a half-made pool is never used and would run on unreachable.
+      for (const lane of lanes) lane.worker.terminate();
       console.warn('[buildings] no cell workers; cells are put together on the page', error);
       this.broken = true;
     }
