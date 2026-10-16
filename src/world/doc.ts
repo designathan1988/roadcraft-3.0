@@ -132,6 +132,11 @@ export interface RoadSegment {
   cutWalls?: true;
 }
 
+/** One that keeps road records by reference (`RoadDoc.keepRoads`): told before a record is first changed in place, to keep it as it stood. */
+export interface RoadKeeper {
+  beforeWrite(part: 'nodes' | 'segments', record: RoadNode | RoadSegment): void;
+}
+
 /** The authoring document: what the user drew, before any derived geometry. */
 /** The place a run of points (a wall, a span of wire) covers, for the diary of changes: one box round them all. */
 function rectsAlong(points: readonly { readonly x: number; readonly y: number }[], pad: number): ChangeRect[] {
@@ -144,6 +149,8 @@ export class RoadDoc {
   readonly segments = new Map<SegmentId, RoadSegment>();
   /** The nodes that may have been left with no road (`pruneOrphanNodes`) */
   private loose = new LooseNodes();
+  /** Who keeps road records by reference (`keepRoads`), held weakly: the only writes of a record in place go through `nodeToWrite` and `segmentToWrite`. */
+  private roadKeepers: WeakRef<RoadKeeper>[] = [];
 
   /** The overhead utility network: poles and the wire runs between them. */
   // DO NOT write these maps directly.
@@ -1458,16 +1465,28 @@ export class RoadDoc {
     this.layOver(copy);
   }
 
-  /** A node's record to change in place: a working copy's own (copied from the original's the first time), or the record itself. */
+  /** A node's record to change in place: a working copy's own (copied from the original's the first time), or the record itself (its keepers told first). */
   private nodeToWrite(id: NodeId): RoadNode | undefined {
     const map = this.nodes;
-    return map instanceof ForkMap ? map.writable(id, copyNode) : map.get(id);
+    if (map instanceof ForkMap) return map.writable(id, copyNode);
+    const node = map.get(id);
+    if (node) for (const ref of this.roadKeepers) ref.deref()?.beforeWrite('nodes', node);
+    return node;
   }
 
   /** A segment's record to change in place (as `nodeToWrite`). */
   private segmentToWrite(id: SegmentId): RoadSegment | undefined {
     const map = this.segments;
-    return map instanceof ForkMap ? map.writable(id, copySegment) : map.get(id);
+    if (map instanceof ForkMap) return map.writable(id, copySegment);
+    const segment = map.get(id);
+    if (segment) for (const ref of this.roadKeepers) ref.deref()?.beforeWrite('segments', segment);
+    return segment;
+  }
+
+  /** A keeper of the road records by reference (`world/docImage.ts`): told before any of them is changed in place here. */
+  keepRoads(keeper: RoadKeeper): void {
+    this.roadKeepers = this.roadKeepers.filter((ref) => ref.deref() !== undefined);
+    if (!this.roadKeepers.some((ref) => ref.deref() === keeper)) this.roadKeepers.push(new WeakRef(keeper));
   }
 
   /** A list about to be written in place: a working copy's own, copied from the original's the first time (`fork`). */
