@@ -24,7 +24,8 @@ function check(geometry: BufferGeometry): { minY: number; maxY: number } {
   const position = geometry.getAttribute('position');
   const normal = geometry.getAttribute('normal');
   const color = geometry.getAttribute('color');
-  expect(position.count % 3).toBe(0);
+  // Whole triangles: by the index when the corners are shared (`merge`), else three corners each.
+  expect((geometry.index?.count ?? position.count) % 3).toBe(0);
   expect(normal.count).toBe(position.count);
   expect(color.count).toBe(position.count);
   let minY = Infinity;

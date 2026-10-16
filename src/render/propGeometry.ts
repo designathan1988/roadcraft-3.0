@@ -13,7 +13,7 @@ import {
   Quaternion,
   Vector3,
 } from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 import { Rng } from '@core/rng';
 import { lowPolyTreeParts, type LowPolyKind, type LowPolyParts } from './lowPolyTrees';
@@ -79,9 +79,12 @@ function part(
 }
 
 function merge(parts: BufferGeometry[]): BufferGeometry {
-  const merged = mergeGeometries(parts, false);
+  const flat = mergeGeometries(parts, false);
   for (const geometry of parts) geometry.dispose();
-  if (!merged) throw new Error('prop parts could not be merged');
+  if (!flat) throw new Error('prop parts could not be merged');
+  // The same faces, each corner shared by the triangles that have it exactly (position, normal, colour): fewer vertices drawn per instance.
+  const merged = mergeVertices(flat, 1e-6);
+  flat.dispose();
   merged.computeBoundingSphere();
   merged.computeBoundingBox();
   return merged;
@@ -375,7 +378,7 @@ export function treePitGeometry(): BufferGeometry {
   return merge(parts);
 }
 
-/** Triangle count of a non-indexed prop geometry. */
+/** Triangle count of a prop geometry. */
 export const trianglesOf = (geometry: BufferGeometry): number =>
   (geometry.index?.count ?? geometry.getAttribute('position').count) / 3;
 
