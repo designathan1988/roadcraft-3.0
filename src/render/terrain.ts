@@ -54,7 +54,6 @@ import { markAll, markBox } from './mesh/updateRanges';
 import { DETAIL_GLSL, detailSwitch, detailTextures } from './mesh/detailLayer';
 import { applyLotOverlay } from './lotOverlay';
 import { WATER_DEPTH_ATTRIBUTE, WATER_FLOW_ATTRIBUTE, createWaterSurface, type WaterLook } from './water';
-import type { GullyDab } from '@world/gullies';
 import { type CornerGrid, type TerrainRegion, type TerrainShaper, boxRegion, sampleCorners, shapeCorners } from './terrainShaping';
 import { type NaturalPlate, type PlateShapeAnswer, type PlateShapeAsk, askPlate } from './groundShape';
 import type { Aabb } from '@core/aabb';
@@ -112,8 +111,6 @@ export interface TerrainSurface {
   bakeRelief(renderer: WebGLRenderer, focus: { readonly x: number; readonly z: number } | null): void;
   /** How the rivers and lakes look and move: waves, foam, current (`render/water.ts` WaterLook). */
   setWaterLook(look: WaterLook): void;
-  /** The gullies the player cut or wiped, and how much of the steep land carries them of itself (`world/gullies.ts`). */
-  setGullies(dabs: readonly GullyDab[], auto: number): void;
   /** The terrain's own surface for the batter from a footway down to the ground (`roadSurfaces.ts`) */
   readonly vergeMaterial: Material;
   /** The analytic height field: the smooth surface the stamps describe. */
@@ -2376,8 +2373,6 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     },
     ground,
     setSun,
-    // The gullies were drawn by the fine relief alone; it was read by nothing the ground draws (see `bakeRelief`).
-    setGullies() {},
     setWaterLook(look) { waterSurface.setLook(look); },
     bakeRelief() {},
     vergeMaterial,

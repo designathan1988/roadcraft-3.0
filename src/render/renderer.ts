@@ -575,6 +575,7 @@ export function createSceneRenderer(
   /** Placed signs, street name plates and the junctions' rule plates, kept sign by sign from the diary (`signLayer.ts`). */
   const signs = createSignLayer();
   let polePreviewKey = '';
+  const polePreviewRoads = new JournalCursor(['roads']);
   /** Walls, fences and hedges (`barriers.ts`), kept barrier by barrier from the diary. */
   const barriers = createBarriers();
   /** Public transport (`transit.ts`), kept track by track and stop by stop from the diary. */
@@ -858,8 +859,6 @@ export function createSceneRenderer(
     const distance = Math.hypot(x - rig.target.x, y + rig.target.z);
     for (const listener of strikeListeners) listener(x, y, distance);
   };
-  /** The gully revision the relief was baked for. */
-  let gulliesFor = -1;
   /** The painted fog's map (`fogLayer.ts`), and the fog and land it was built for. */
   const fogTexture = createFogTexture();
   let fogLayer: FogLayer | null = null;
@@ -948,6 +947,15 @@ export function createSceneRenderer(
     roomLights.push(light);
   }
   let lampsKey = '';
+  /** Whether a building came, went or changed where the floors cut open are lit (`roomLamps.ts`), from the diary. */
+  const lampsRead = new JournalCursor(['buildings']);
+  const buildingsMovedNear = (doc: RoadDoc, spec: CutawaySpec): boolean => {
+    const entries = lampsRead.read(doc.changes);
+    if (entries === null) return true;
+    const only = spec.only !== undefined ? doc.buildings.get(spec.only) : undefined;
+    const box = only ? storedBounds(only, 0) : { minX: spec.x - spec.radius, minY: spec.y - spec.radius, maxX: spec.x + spec.radius, maxY: spec.y + spec.radius };
+    return entries.some((e) => e.rects === null || e.rects.some((r) => r[0] <= box.maxX && r[2] >= box.minX && r[1] <= box.maxY && r[3] >= box.minY));
+  };
   let tallestFor = -1;
   /** The sky's mesh (`environment.ts`), found once by name (`draw`). */
   let skyMesh: Object3D | null = null;
@@ -1029,16 +1037,12 @@ export function createSceneRenderer(
   /** DO NOT key the canyon on a revision of the whole town again: it laid its whole window at every building. */
   const CANYON_KINDS: readonly ChangeKind[] = ['buildings', 'ground', 'elevation'];
   const CANYON_GROUND_REACH = FLOOR_READ_REACH + m(64);
-  let canyonJournal: ChangeJournal | null = null;
-  let canyonSerial = -1;
+  const canyonRead = new JournalCursor(CANYON_KINDS);
   const NOTHING_CHANGED: readonly ChangeRect[] = [];
   const canyonChanges = (journal: ChangeJournal): readonly ChangeRect[] | null => {
-    const serial = journal.serialOf(...CANYON_KINDS);
-    if (journal === canyonJournal && serial === canyonSerial) return NOTHING_CHANGED;
-    const entries = journal === canyonJournal && canyonSerial >= 0 ? journal.since(canyonSerial, CANYON_KINDS) : null;
-    canyonJournal = journal;
-    canyonSerial = serial;
+    const entries = canyonRead.read(journal);
     if (!entries || entries.some((e) => e.rects === null)) return null;
+    if (!entries.length) return NOTHING_CHANGED;
     // The ground moved under a building's floor (it reads the ground round it) lifts the whole building
     const grow = (r: ChangeRect, d: number): ChangeRect => [r[0] - d, r[1] - d, r[2] + d, r[3] + d];
     return entries.flatMap((e) => e.kind === 'buildings' ? e.rects! : e.rects!.map((r) => grow(r, CANYON_GROUND_REACH)));
@@ -1336,17 +1340,13 @@ export function createSceneRenderer(
     return { landed: true, ms: performance.now() - at };
   };
 
-  /** `doc.utilityRevision` the poles and the furniture were last brought up to. */
-  let utilityRevision = -1;
   /** What moves a pole or its parts: the poles and wires, the roads (its kerb), the roads' heights and the ground under it. */
-  const POLE_KINDS: readonly ChangeKind[] = ['utilities', 'roads', 'elevation', 'ground', 'terrain'];
-  /** The diary's serial of `POLE_KINDS` the pole layer was brought up to. */
-  let poleSerial = -1;
-  /** The pole layer brought up to the diary (`poleLayer.ts`) */
-  const syncUtilities = (net: Network, groundAt: (x: number, y: number) => number): void => {
-    const serial = net.doc.changes.serialOf(...POLE_KINDS);
-    if (utilities && serial === poleSerial) return;
-    const entries = utilities ? net.doc.changes.since(poleSerial, POLE_KINDS) : null;
+  const poleRead = new JournalCursor(['utilities', 'roads', 'elevation', 'ground', 'terrain']);
+  /** The pole layer brought up to the diary (`poleLayer.ts`), on the roads as `solve` set them; whether it had anything to do. */
+  const syncUtilities = (net: Network, solve: RoadElevation): boolean => {
+    const entries = poleRead.read(net.doc.changes);
+    if (utilities && entries !== null && entries.length === 0) return false;
+    const groundAt = poleGroundAt(solve, terrain.renderedHeightAt, net);
     const before = utilities?.triangles ?? 0;
     if (!utilities || entries === null || entries.some((e) => e.rects === null)) {
       if (utilities) { world.remove(utilities.group); utilities.dispose(); }
@@ -1356,15 +1356,7 @@ export function createSceneRenderer(
       utilities.follow(net, groundAt, net.doc, entries);
     }
     builtTriangles += utilities.triangles - before;
-    poleSerial = serial;
-  };
-  /** The poles and the placed things, outside a world being built: a pole edit moves only `doc.utilityRevision` */
-  const rebuildUtilities = (net: Network): void => {
-    if (!elevation) return;
-    utilityRevision = net.doc.utilityRevision;
-    const at = performance.now();
-    syncUtilities(net, poleGroundAt(elevation, terrain.renderedHeightAt, net));
-    performance.measure('hitch:utilities/poles', { start: at, end: performance.now() });
+    return true;
   };
 
   /** The city's clock, read each frame: the planted trees and shrubs grow with it (`plantGrowth`). */
@@ -1457,11 +1449,10 @@ export function createSceneRenderer(
   const rebuildWorld = (net: Network): void => {
     worldNet = net;
     if (networkRevision === net.revision && terrainRevision === net.doc.terrainRevision) {
-      // A world being built builds the poles too (`worldSteps`)
-      if (worldJob === null && (utilityRevision !== net.doc.utilityRevision || poleSerial !== net.doc.changes.serialOf(...POLE_KINDS))) {
+      // A world being built builds the poles too (`worldSteps`); outside one, a pole edit moves the poles alone.
+      if (worldJob === null && elevation) {
         const atUtilities = performance.now();
-        rebuildUtilities(net);
-        performance.measure('hitch:road-edit/utilities alone', { start: atUtilities, end: performance.now() });
+        if (syncUtilities(net, elevation)) performance.measure('hitch:road-edit/utilities alone', { start: atUtilities, end: performance.now() });
       }
       return;
     }
@@ -1537,9 +1528,6 @@ export function createSceneRenderer(
     const freshDetails = details.prepare(net, solve, terrain.renderedHeightAt, blocks);
     performance.measure('hitch:road-edit/details', { start: atdetails, end: performance.now() });
     yield;
-    // The overhead utility network.
-    const utilityBuilt = net.doc.utilityRevision;
-    yield;
 
     // The new pieces' shaders compiled before they are drawn - in parallel where the driver can
     if (sliced) {
@@ -1564,11 +1552,10 @@ export function createSceneRenderer(
     world.add(roads.group);
     freshDetails.apply();
     if (!details.group.parent) world.add(details.group);
-    utilityRevision = utilityBuilt;
     builtTriangles = triangles + roads.triangles + details.triangles;
     // The poles the edit reached, on the ground just put in place (`syncUtilities`, from the diary).
     const atutilities = performance.now();
-    syncUtilities(net, poleGroundAt(solve, terrain.renderedHeightAt, net));
+    syncUtilities(net, solve);
     performance.measure('hitch:road-edit/utilities', { start: atutilities, end: performance.now() });
     // The street furniture and the signs follow from the diary once the world stands (the engine's 'draw' phase, in `draw`).
     rebuildMs = performance.now() - started;
@@ -2144,9 +2131,11 @@ export function createSceneRenderer(
     },
     setPolePreview(net, preview) {
       const key = preview && elevation
-        ? `${net.revision}:${preview.poles.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)},${+p.lamp},${+p.standing}`).join(';')}`
+        ? preview.poles.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)},${+p.lamp},${+p.standing}`).join(';')
         : '';
-      if (key === polePreviewKey) return;
+      // The run built again when it changed, or the roads it stands along did (from the diary).
+      const roadsMoved = polePreviewRoads.read(net.doc.changes);
+      if (key === polePreviewKey && roadsMoved !== null && roadsMoved.length === 0) return;
       polePreviewKey = key;
       if (polePreview) {
         world.remove(polePreview.group);
@@ -2508,8 +2497,9 @@ export function createSceneRenderer(
       for (const ped of sim.pedViews) if (ped.v > 0.05) wear.feet(ped.x, ped.y, wallDt);
       wear.tick(wallDt);
       // The rooms cut open are lit from inside: brighter as the day goes.
-      const key = cutSpec ? `${cutSpec.level}@${cutSpec.x},${cutSpec.y}:${net.doc.buildings.revision}` : '';
-      if (key !== lampsKey) {
+      const key = cutSpec ? `${cutSpec.level}@${cutSpec.x},${cutSpec.y}` : '';
+      const lampsMoved = !!cutSpec && buildingsMovedNear(net.doc, cutSpec);
+      if (key !== lampsKey || lampsMoved) {
         lampsKey = key;
         const lamps = roomLamps.lamps(net.doc, cutSpec, builtGroundAt, pavedHeightAt, ROOM_LIGHTS);
         roomLights.forEach((light, i) => {
@@ -2650,10 +2640,6 @@ export function createSceneRenderer(
         // Close: the screen's height under some 1800 units of ground, in either camera
         const halfHeight = renderer.domElement.clientHeight / Math.max(1e-3, 2 * rig.viewport.zoom);
         const close = halfHeight < 900;
-        if (net.doc.gullyRevision !== gulliesFor) {
-          gulliesFor = net.doc.gullyRevision;
-          terrain.setGullies(net.doc.gullyDabs, net.doc.gullyAuto);
-        }
         // The atlas keeps in full only the plates near what the view takes in (`flatAtlas.ts`).
         terrain.focus?.(centre.x, centre.y, halfHeight);
         // The roads at full detail within reach of what the view takes in, the far level beyond: a few frames apart

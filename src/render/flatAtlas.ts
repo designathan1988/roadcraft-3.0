@@ -541,9 +541,6 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       lookGiven = true;
       for (const p of plates) p.surface?.setWaterLook(look);
     },
-    // The gullies were drawn by the fine relief alone, which nothing the ground draws read (`terrain.ts` `bakeRelief`).
-    setGullies() {},
-
     setVegetation(amount) {
       farForest.book.setVegetation(amount);
     },
