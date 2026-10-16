@@ -1,5 +1,6 @@
 import type { Vec2 } from '@core/vec2';
-import type { ChangeRect } from '@world/changes';
+import { rectAround, type ChangeRect } from '@world/changes';
+import { CellFiling } from '@world/cells';
 import type { RoadDoc } from '@world/doc';
 import type { Network } from '@world/network';
 import {
@@ -9,6 +10,7 @@ import {
 import { solidFootprints } from '@world/buildings/geometry';
 import type { BuildingId } from '@world/buildings/types';
 import { JournalCursor } from '@world/derived';
+import { LotStore } from '@world/lotStore';
 import { m } from '@world/units';
 import { nearestRibbon } from '@world/nearestRibbon';
 import type { ZoneDensity, ZoneUse } from '@world/zones';
@@ -84,19 +86,22 @@ export class LotTool {
 
   /** The overlay with the other tools and the lots and buildings it was made from (`overlayKeyed`). */
   private quiet: { key: string; overlay: LotOverlay & { readonly key: string } } | null = null;
-  private zonedFor = -1;
-  private zoned = false;
+  /** The zoned lots by id, kept by the diary's entries of the lots (`anyZoned`). */
+  private readonly zonedIds = new Set<number>();
+  private readonly zonedCursor = LotStore.cursor();
 
-  /** Whether any lot is zoned: the faint zones are shown with the other tools. Looked at again when the lots change. */
+  /** Whether any lot is zoned: the faint zones are shown with the other tools. */
   anyZoned(): boolean {
-    if (this.zonedFor !== this.doc.lotRevision) this.lookForZoned();
-    return this.zoned;
+    const changed = this.doc.lotStore.changedFor(this.zonedCursor);
+    if (changed === null) this.lookForZoned();
+    else for (const id of changed) { if (this.doc.lot(id)?.use) this.zonedIds.add(id); else this.zonedIds.delete(id); }
+    return this.zonedIds.size > 0;
   }
 
-  /** @rebuild Called when the lots changed (`anyZoned`). */
+  /** @rebuild Every lot read when the diary cannot say which changed (the first time, a load). */
   private lookForZoned(): void {
-    this.zonedFor = this.doc.lotRevision;
-    this.zoned = this.doc.lots.some((l) => l.use);
+    this.zonedIds.clear();
+    for (const l of this.doc.lotStore.all()) if (l.use) this.zonedIds.add(l.id);
   }
 
   /** `overlay` with the key the scene compares (`render/lotOverlay.ts`). */
@@ -205,9 +210,16 @@ export class LotTool {
 
   // ------------------------------------------------------------ the proposed lots
 
-  /** What the proposal was worked out from: the roads and the stored lots. */
+  /** The network's state and the diary of the lots the proposal was last keyed on (`proposalKey`). */
+  private planNet: object | null = null;
+  private readonly planCursor = new JournalCursor(['lots', 'lotKeys']);
+  private planEdits = 0;
+
+  /** What the proposal was worked out from: the network's own state (`Network.state`) and the lots and their keys, by the diary. */
   private proposalKey(): string {
-    return `${this.net.revision}:${this.doc.lots.length}:${this.doc.nextLotId}`;
+    const changed = this.planCursor.read(this.doc.changes);
+    if (this.planNet !== this.net.state || changed === null || changed.length > 0) { this.planNet = this.net.state; this.planEdits++; }
+    return `${this.planEdits}`;
   }
 
   /** Moves the proposal on by up to `budget` milliseconds, starting it again when what it was worked out from changed. */
@@ -242,8 +254,18 @@ export class LotTool {
   private proposedAt(p: Vec2): number {
     const prop = this.proposal;
     if (!prop || prop.steps || prop.key !== this.proposalKey()) return -1;
-    return prop.lots.findIndex((corners) => insideLot(p, { corners }));
+    // Filed by place once per proposal: this runs for each of up to 400 steps of a pointer move.
+    if (this.proposalCells?.lots !== prop.lots) {
+      const cells = new CellFiling<number, readonly Vec2[]>(m(64));
+      prop.lots.forEach((corners, k) => { const box = rectAround(corners); if (box) cells.file(k, corners, box); });
+      this.proposalCells = { lots: prop.lots, cells };
+    }
+    // The first in the proposal's order, as a walk of it finds.
+    for (const k of this.proposalCells.cells.idsMeeting([p.x, p.y, p.x, p.y])) if (insideLot(p, { corners: prop.lots[k]! })) return k;
+    return -1;
   }
+  /** The proposed lots filed by place (`proposedAt`), for the proposal's list they were filed from. */
+  private proposalCells: { readonly lots: readonly Vec2[][]; readonly cells: CellFiling<number, readonly Vec2[]> } | null = null;
 
   /** A stroke's points that waited on the proposal, read once it is ready. */
   private readPending(stroke: NonNullable<LotTool['stroke']>): void {
@@ -264,10 +286,10 @@ export class LotTool {
       for (let id = first; id < doc.nextLotId; id++) stroke.ids.add(id);
       return zoneLots(doc, [...stroke.ids], stroke.remove ? null : { use, density }) || fresh.length > 0;
     });
-    // The proposal holds on: the lots laid were its own, and the rest of it is as it was
-    if (before && fresh.length) {
+    // The proposal holds on: the lots laid were its own, the zones are not read by it, and the rest of it is as it was
+    if (before) {
       const laid = new Set(stroke.fresh);
-      this.proposal = { key: this.proposalKey(), steps: null, lots: before.lots.filter((_, k) => !laid.has(k)), keys: before.keys, keyRects: before.keyRects };
+      this.proposal = { key: this.proposalKey(), steps: null, lots: fresh.length ? before.lots.filter((_, k) => !laid.has(k)) : before.lots, keys: before.keys, keyRects: before.keyRects };
     }
     this.refused.clear();
     host.hint(stroke.remove ? 'hint.zone.removed' : 'hint.zone.painted');
@@ -297,12 +319,18 @@ export class LotTool {
   /** The snap of lot points to the footways, the blocks' corners and the other lots' corners. */
   private snapReach(): number { return Math.max(m(2.5), 16 / Math.max(0.05, this.host.zoom())); }
   private snap(p: Vec2): Vec2 { return lotSnapper(this.doc, this.net)(p, this.snapReach()).p; }
-  private lotAt(p: Vec2): Lot | undefined { return this.doc.lots.find((l) => insideLot(p, l)); }
+  /** DO NOT search `doc.lots`: this runs for each of up to 400 steps of a pointer move. */
+  private lotAt(p: Vec2): Lot | undefined { return this.doc.lotAt(p); }
+  /** The lots whose box comes within `reach` of a point, in the lots' order (as a walk of `doc.lots` meets them). */
+  private lotsNear(p: Vec2, reach: number): Lot[] {
+    const store = this.doc.lotStore;
+    return this.doc.lotsIn([p.x - reach, p.y - reach, p.x + reach, p.y + reach]).sort((a, b) => store.orderOf(a.id)! - store.orderOf(b.id)!);
+  }
 
   /** The side of a lot nearest a point: its two corners. */
   private sideNear(p: Vec2): { a: Vec2; b: Vec2 } | null {
     let best: { a: Vec2; b: Vec2 } | null = null, bestD = 18 / Math.max(0.05, this.host.zoom());
-    for (const l of this.doc.lots) for (let i = 0; i < l.corners.length; i++) {
+    for (const l of this.lotsNear(p, bestD)) for (let i = 0; i < l.corners.length; i++) {
       const a = l.corners[i]!, b = l.corners[(i + 1) % l.corners.length]!;
       const q = p;
       const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy || 1;
@@ -316,7 +344,8 @@ export class LotTool {
   /** The side of a lot nearest a point within reach: the lot and the side's index (corner i to i + 1). */
   private sideAt(p: Vec2): { lot: Lot; side: number; a: Vec2; b: Vec2 } | null {
     let best: { lot: Lot; side: number; a: Vec2; b: Vec2 } | null = null, bestD = 18 / Math.max(0.05, this.host.zoom());
-    for (const l of this.doc.lots) for (let i = 0; i < l.corners.length; i++) {
+    // A lot the point is in counts 1e-3 nearer: the reach grown by as much.
+    for (const l of this.lotsNear(p, bestD + 1e-3)) for (let i = 0; i < l.corners.length; i++) {
       const a = l.corners[i]!, b = l.corners[(i + 1) % l.corners.length]!;
       const q = p;
       const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy || 1;
@@ -330,8 +359,8 @@ export class LotTool {
 
   /** A dragged corner's snap: onto the streets and other corners, never onto itself. */
   private snapExcept(p: Vec2, from: Vec2): Vec2 {
-    const snap = lotSnapper(this.doc, this.net, this.doc.lots.map((l) => ({ id: l.id, corners: l.corners.filter((q) => Math.hypot(q.x - from.x, q.y - from.y) > m(0.8)) })));
-    return snap(p, this.snapReach()).p;
+    // The lots near the point only (`lotSnapper` asks the store by place), their corners at the dragged one left out.
+    return lotSnapper(this.doc, this.net, undefined, from)(p, this.snapReach()).p;
   }
 
   /** Which side of a lot is its front: the longest of those against a street */
@@ -399,7 +428,7 @@ export class LotTool {
     if (settings.mode === 'edit') {
       // The nearest corner within reach of the pointer.
       let best: Vec2 | null = null, bestD = 14 / zoom;
-      for (const l of doc.lots) for (const q of l.corners) {
+      for (const l of this.lotsNear(at, bestD)) for (const q of l.corners) {
         const d = Math.hypot(q.x - at.x, q.y - at.y);
         if (d < bestD) { bestD = d; best = q; }
       }

@@ -69,7 +69,7 @@
   },
   "src/editor/lotTool.ts": {
     "roadcraft/no-global-revision": {
-      "count": 5
+      "count": 2
     }
   },
   "src/editor/nodeMover.ts": {
