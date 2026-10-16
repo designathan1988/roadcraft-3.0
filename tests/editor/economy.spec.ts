@@ -80,19 +80,19 @@ describe('paying for roads', () => {
     // A split re-cuts the road: the same road, nothing to pay.
     const before = doc.economy.balance;
     const line = net.polylines.get(doc, first);
-    expect(guardRoadEdit(doc, net, () => splitSegment(doc, net, first, line.length / 2, line.sampleAt(line.length / 2).p) !== null).changed).toBe(true);
+    expect(guardRoadEdit(doc, net, (work, workNet) => splitSegment(work, workNet, first, line.length / 2, line.sampleAt(line.length / 2).p) !== null).changed).toBe(true);
     expect(doc.segments.size).toBe(2);
     expect(doc.economy.balance).toBe(before);
     const id = [...doc.segments.keys()][0] as SegmentId;
     const balance = doc.economy.balance;
     // A wider class costs the difference.
-    const widened = guardRoadEdit(doc, net, () => { doc.setSegmentType(id, 3); return true; });
+    const widened = guardRoadEdit(doc, net, (work) => { work.setSegmentType(id, 3); return true; });
     expect(widened.changed).toBe(true);
     expect(doc.economy.balance).toBeLessThan(balance);
     // With no money left, the next widening is refused and undone.
     doc.setBalance(0);
     const lanes = doc.requireSegment(id).lanes;
-    const refused = guardRoadEdit(doc, net, () => { doc.setSegmentLanes(id, 8); return true; });
+    const refused = guardRoadEdit(doc, net, (work) => { work.setSegmentLanes(id, 8); return true; });
     expect(refused).toEqual({ changed: false, refused: 'funds' });
     expect(doc.requireSegment(id).lanes).toBe(lanes);
     expect(doc.economy.balance).toBe(0);

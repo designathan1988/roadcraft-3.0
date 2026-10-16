@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { forkWork } from '@core/forkMap';
+import { ForkMap, forkWork } from '@core/forkMap';
 import { RoadDoc } from '@world/doc';
 import { Network } from '@world/network';
 import type { Change } from '@world/changes';
@@ -65,6 +65,23 @@ function places(doc: RoadDoc): unknown {
     marks: doc.allocatorMarks(),
     nextLot: doc.nextLotId,
     keys: doc.lotKeys.length,
+  };
+}
+
+/** What a network derived from its document, as plain data in its own order: ribbons, junctions, trims, marks, filings. */
+function derived(doc: RoadDoc, net: Network): unknown {
+  const all = [-1e5, -1e5, 1e5, 1e5] as const;
+  return {
+    ribbons: [...net.ribbons].map(([id, r]) => [id, r.full.length]),
+    junctions: [...net.junctions].map(([id, byLevel]) => [id, [...byLevel.keys()]]),
+    trims: [...net.trims],
+    plates: [...net.plateReach],
+    impossible: [...net.impossible],
+    squeezed: [...net.squeezed],
+    transitions: [...net.transitions],
+    cells: [net.segmentCells.idsMeeting(all), net.junctionCells.idsMeeting(all), net.flushCells.idsMeeting(all)],
+    lines: [...doc.segments.keys()].map((id) => net.polylines.get(doc, id).length),
+    revisions: [net.revision, net.trafficRevision],
   };
 }
 
@@ -190,14 +207,14 @@ function sameEdits(text: string, seed: number, steps: number): void {
     edit(a, na, at);
     if (na.revision !== a.revision) na.rebuild();
     const work = b.fork();
-    const workNet = new Network(work);
-    workNet.adopt(nb);
+    const workNet = nb.fork(work);
     edit(work, workNet, at);
     if (workNet.revision !== work.revision) workNet.rebuild();
     b.replaceWith(work);
-    nb.adopt(workNet);
+    nb.takeBack(workNet);
     expect(b.changes.since(fromB)?.map(said), `${name} (step ${step}): the diary`).toEqual(a.changes.since(fromA)?.map(said));
     expect(places(b), `${name} (step ${step}): the indices by place`).toEqual(places(a));
+    expect(derived(b, nb), `${name} (step ${step}): the network taken back`).toEqual(derived(a, na));
   }
   expect(b.toJSON()).toEqual(a.toJSON());
   expect(nb.revision).toBe(na.revision);
@@ -261,6 +278,8 @@ describe('roads drawn through the fork', () => {
       expect(JSON.stringify(b.toJSON()), 'the dry run left the map alone').toBe(text);
       expect(b.changes.version).toBe(version);
       const was = step(ha, a, () => road(a, na, p, q));
+      // The whole copy's diary is written anew (`replaceWith`): its network catches up, as the game's does after an edit.
+      if (na.revision !== a.revision) na.rebuild();
       const now = step(hb, b, () => road(b, nb, p, q));
       expect({ ...now, elevation: undefined, stations: undefined }).toEqual({ ...was, elevation: undefined, stations: undefined });
       expect(preview.committed).toBe(now.committed);
@@ -354,6 +373,32 @@ describe('a one-road edit copies what it touches', () => {
     console.log(`one road drawn (dry run + commit) on ${records} records: ${copied} copied`);
     expect(records).toBeGreaterThan(10_000);
     expect(copied).toBeLessThan(records / 100);
+  });
+
+  it('its network is a working copy too: it holds what the edit rebuilt, and takes back the network a full build makes', () => {
+    const doc = largeMap();
+    const net = new Network(doc);
+    net.rebuild();
+    const work = doc.fork();
+    const workNet = net.fork(work);
+    const id = nth(doc.segments.keys(), 0.5)!;
+    work.setSegmentLanes(id, 4);
+    workNet.rebuild();
+    const written = (map: ReadonlyMap<unknown, unknown>): number => {
+      const { gone, replaced, added } = (map as ForkMap<unknown, unknown>).changes();
+      return gone.size + replaced.size + added.size;
+    };
+    const own = written(workNet.ribbons) + written(workNet.junctions) + written(workNet.trims) + written(workNet.plateReach);
+    expect(own).toBeGreaterThan(0);
+    expect(own).toBeLessThan((net.ribbons.size + net.junctions.size + net.trims.size + net.plateReach.size) / 100);
+    expect(net.ribbons.get(id)).not.toBe(workNet.ribbons.get(id));
+    doc.takeBack(work);
+    net.takeBack(workNet);
+    const full = new Network(doc);
+    full.rebuild();
+    const sorted = (d: unknown): unknown => JSON.parse(JSON.stringify(d, (_k, v: unknown) =>
+      Array.isArray(v) && v.every((e) => Array.isArray(e)) ? [...(v as unknown[][])].sort((p, q) => String(p[0]).localeCompare(String(q[0]))) : v));
+    expect(sorted(derived(doc, net))).toEqual(sorted(derived(doc, full)));
   });
 });
 

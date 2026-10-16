@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { RoadDoc } from '@world/doc';
 import { Network } from '@world/network';
-import { buildRoadElevation, type RoadElevation } from '@world/elevation';
+import { FLAT_GROUND, buildRoadElevation, type RoadElevation } from '@world/elevation';
+import type { SectionMaterials } from '@world/roadSection';
 import { Level } from '@world/roadTypes';
 import { applyOp, freshState, type FuzzOp } from '../fuzz/support/ops';
 import {
@@ -555,5 +556,24 @@ describe('tunnels', () => {
     expect(deep.weight).toBeLessThan(0.01);
     const mouth = field.shapeAt(-430 * U, 0, ground(-430 * U, 0));
     expect(mouth.weight).toBeGreaterThan(0.5);
+  });
+});
+
+describe("a road's look in the solve", () => {
+  /** The summary digest of one road paved with `materials`. */
+  const lookOf = (materials: SectionMaterials): number => {
+    const doc = new RoadDoc();
+    const a = doc.addNode({ x: 0, y: 0 }), b = doc.addNode({ x: 100, y: 0 });
+    const seg = doc.addSegment(a.id, b.id, 1)!;
+    doc.setSegmentSection(seg.id, { laneWidth: 3.5, sidewalk: 3, median: 0, speedKmh: 50, priority: 1, materials });
+    const net = new Network(doc);
+    net.rebuild();
+    return buildRoadElevation(net, FLAT_GROUND).summaries!().get(seg.id)!.digest;
+  };
+
+  it('reads the materials, not the order their keys were written in', () => {
+    expect(lookOf({ carriageway: 'cobble', footwayLeft: 'stone' })).toBe(lookOf({ footwayLeft: 'stone', carriageway: 'cobble' }));
+    expect(lookOf({ carriageway: 'cobble', footwayLeft: 'stone' })).not.toBe(lookOf({ carriageway: 'cobble', footwayRight: 'stone' }));
+    expect(lookOf({ carriageway: 'cobble' })).not.toBe(lookOf({ carriageway: 'concrete' }));
   });
 });

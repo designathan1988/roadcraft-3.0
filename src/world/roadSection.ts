@@ -188,10 +188,12 @@ export function flipSection(s: RoadSection | undefined): RoadSection | undefined
 
 /** Every field of `SectionMaterials`: a field added there and left out here does not compile. */
 const MATERIAL_FIELDS: Record<keyof SectionMaterials, true> = { carriageway: true, footwayLeft: true, footwayRight: true, median: true };
+/** The fields of `SectionMaterials`, always in this order. */
+export const MATERIAL_KEYS = Object.keys(MATERIAL_FIELDS) as readonly (keyof SectionMaterials)[];
 
 /** DO NOT compare them as JSON text: the text follows the order the keys were written in */
 function sameMaterials(a: SectionMaterials | undefined, b: SectionMaterials | undefined): boolean {
-  return (Object.keys(MATERIAL_FIELDS) as (keyof SectionMaterials)[]).every((key) => a?.[key] === b?.[key]);
+  return MATERIAL_KEYS.every((key) => a?.[key] === b?.[key]);
 }
 
 export function sameRoadSection(a: RoadSection | undefined, b: RoadSection | undefined): boolean {

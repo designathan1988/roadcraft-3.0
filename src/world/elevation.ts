@@ -20,6 +20,7 @@ import {
   type RoadReads,
 } from './roadField';
 import { ROAD_TUNING } from './roads/tuning';
+import { MATERIAL_KEYS } from './roadSection';
 import {
   ROAD_GROUND_CLEARANCE,
   TUNNEL_BORE,
@@ -754,11 +755,12 @@ function sameProfile(a: Profile, b: Profile): boolean {
     a.look === b.look;
 }
 
-/** A digest of what a road looks like beyond its widths (materials, flush footways); 0 for the class's own. */
+/** DO NOT write the materials out as text to digest them (`JSON.stringify` of every road with its own, per solve). */
 function lookDigest(rt: RoadType): number {
   if (!rt.materials && !rt.flushLeft && !rt.flushRight && !rt.medianFlush) return 0;
-  return new Digest().addText(JSON.stringify(rt.materials ?? null)).add(rt.flushLeft ? 1 : 0).add(rt.flushRight ? 1 : 0)
-    .add(rt.medianFlush ? 1 : 0).value() || 1;
+  const digest = new Digest();
+  for (const key of MATERIAL_KEYS) digest.addText(rt.materials?.[key] ?? '-');
+  return digest.add(rt.flushLeft ? 1 : 0).add(rt.flushRight ? 1 : 0).add(rt.medianFlush ? 1 : 0).value() || 1;
 }
 
 /** The ground under a road: the dilated ceiling and the designed grade line (see the stations step). */

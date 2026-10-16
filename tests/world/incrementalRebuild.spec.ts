@@ -115,7 +115,7 @@ describe('incremental network and height rebuild', () => {
     moveNodeChecked(doc, net, node.id, { x: node.x + 6, y: node.y + 4 });
     settle(`move of node ${node.id}`);
     const retyped = ids[Math.floor(ids.length / 3)] as SegmentId;
-    guardRoadEdit(doc, net, () => { doc.setSegmentType(retyped, (doc.requireSegment(retyped).type + 1) % 4); return true; });
+    guardRoadEdit(doc, net, (work) => { work.setSegmentType(retyped, (work.requireSegment(retyped).type + 1) % 4); return true; });
     settle(`retype of ${retyped}`);
     const raised = [...doc.nodes.values()].find((n) => n.incident.length === 2)!;
     doc.setNodeHeightOffset(raised.id, raised.heightOffset + 10);

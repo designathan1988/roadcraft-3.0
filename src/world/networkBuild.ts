@@ -13,6 +13,7 @@ import type { PolylineCache } from './geometry';
 import type { NetworkDelta } from './networkDelta';
 import { type SegmentRibbon, type SegmentTrims, bendAt, junctionBounds, makeRibbon, ribbonBounds } from './ribbons';
 import { networkWork } from './rebuildWork';
+import { ForkMap, ForkSet } from '@core/forkMap';
 
 /** What the build writes: the network's own derived maps */
 interface Network {
@@ -79,7 +80,7 @@ export class NetworkBuild {
   private nodeSource = new Map<NodeId, string>();
   private nodeRecord = new Map<NodeId, string>();
   private nodeIncident = new Map<NodeId, readonly SegmentId[]>();
-  private readonly nodePlaces = new CellFiling<NodeId, object>();
+  private nodePlaces = new CellFiling<NodeId, object>();
 
   private active = new Set<NodeId>();
   private j1 = new Map<NodeId, MemoEntry>();
@@ -106,7 +107,7 @@ export class NetworkBuild {
     this.nodeSource = new Map();
     this.nodeRecord = new Map();
     this.nodeIncident = new Map();
-    this.nodePlaces.copyFrom(new CellFiling());
+    this.nodePlaces = new CellFiling();
     this.active = new Set();
     this.j1 = new Map();
     this.j2 = new Map();
@@ -121,27 +122,51 @@ export class NetworkBuild {
     this.junctionMax = -Infinity;
   }
 
-  /** Takes another build's state as its own (`Network.adopt`, `seedJunctions`) */
-  copyFrom(other: NetworkBuild, upToDate: boolean): void {
-    this.seen = upToDate ? this.net.doc.changes.version : other.seen;
-    this.segmentSource = new Map(other.segmentSource);
-    this.segmentEnds = new Map(other.segmentEnds);
-    this.nodeSource = new Map(other.nodeSource);
-    this.nodeRecord = new Map(other.nodeRecord);
-    this.nodeIncident = new Map(other.nodeIncident);
-    this.nodePlaces.copyFrom(other.nodePlaces);
-    this.active = new Set(other.active);
-    this.j1 = new Map(other.j1);
-    this.j2 = new Map(other.j2);
-    this.j3 = new Map(other.j3);
-    this.scale1 = new Map(other.scale1);
-    this.scale2 = new Map(other.scale2);
-    this.trims2 = new Map(other.trims2);
-    this.plateRaw = new Map(other.plateRaw);
-    this.plateKeys = new Map(other.plateKeys);
-    this.ribbonMemo = new Map(other.ribbonMemo);
+  /** DO NOT copy the build's records for an edit: a working copy over `other`'s (`Network.fork`), never written while it stands. */
+  layOver(other: NetworkBuild): void {
+    // Where the copy's diary starts (`ChangeJournal.forkFrom`): an older serial would read as everything changed.
+    this.seen = other.net.doc.changes.version;
+    this.segmentSource = new ForkMap(other.segmentSource);
+    this.segmentEnds = new ForkMap(other.segmentEnds);
+    this.nodeSource = new ForkMap(other.nodeSource);
+    this.nodeRecord = new ForkMap(other.nodeRecord);
+    this.nodeIncident = new ForkMap(other.nodeIncident);
+    this.nodePlaces = other.nodePlaces.fork();
+    this.active = new ForkSet(other.active);
+    this.j1 = new ForkMap(other.j1);
+    this.j2 = new ForkMap(other.j2);
+    this.j3 = new ForkMap(other.j3);
+    this.scale1 = new ForkMap(other.scale1);
+    this.scale2 = new ForkMap(other.scale2);
+    this.trims2 = new ForkMap(other.trims2);
+    this.plateRaw = new ForkMap(other.plateRaw);
+    this.plateKeys = new ForkMap(other.plateKeys);
+    this.ribbonMemo = new ForkMap(other.ribbonMemo);
     this.ribbonMax = other.ribbonMax;
     this.junctionMax = other.junctionMax;
+  }
+
+  /** Takes back the records of a working copy laid over this build (`layOver`): what it wrote, or what it rebuilt whole. */
+  takeBack(copy: NetworkBuild): void {
+    this.seen = copy.seen;
+    this.segmentSource = taken(this.segmentSource, copy.segmentSource);
+    this.segmentEnds = taken(this.segmentEnds, copy.segmentEnds);
+    this.nodeSource = taken(this.nodeSource, copy.nodeSource);
+    this.nodeRecord = taken(this.nodeRecord, copy.nodeRecord);
+    this.nodeIncident = taken(this.nodeIncident, copy.nodeIncident);
+    if (copy.nodePlaces.isForkOf(this.nodePlaces)) this.nodePlaces.takeBack(copy.nodePlaces); else this.nodePlaces = copy.nodePlaces;
+    if (copy.active instanceof ForkSet) copy.active.applyTo(this.active); else this.active = copy.active;
+    this.j1 = taken(this.j1, copy.j1);
+    this.j2 = taken(this.j2, copy.j2);
+    this.j3 = taken(this.j3, copy.j3);
+    this.scale1 = taken(this.scale1, copy.scale1);
+    this.scale2 = taken(this.scale2, copy.scale2);
+    this.trims2 = taken(this.trims2, copy.trims2);
+    this.plateRaw = taken(this.plateRaw, copy.plateRaw);
+    this.plateKeys = taken(this.plateKeys, copy.plateKeys);
+    this.ribbonMemo = taken(this.ribbonMemo, copy.ribbonMemo);
+    this.ribbonMax = copy.ribbonMax;
+    this.junctionMax = copy.junctionMax;
   }
 
   /** Whether a full rebuild must follow (never built, or forgotten). */
@@ -639,6 +664,13 @@ export class NetworkBuild {
     this.ribbonMemo.set(id, { ribbon, trims: trimsKey, bendA, bendB });
     return ribbon;
   }
+}
+
+/** A working copy's map taken back into `mine`: its writes when it is laid over `mine` (`ForkMap`), else itself (built whole). */
+function taken<K, V>(mine: Map<K, V>, theirs: Map<K, V>): Map<K, V> {
+  if (!(theirs instanceof ForkMap)) return theirs;
+  theirs.applyTo(mine);
+  return mine;
 }
 
 /** Sets entries of a map kept in increasing key order */

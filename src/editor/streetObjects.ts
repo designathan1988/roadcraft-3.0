@@ -41,9 +41,7 @@ export function commitPedestrianCrossing(
   }
 
   const work = doc.fork();
-  const workNet = new Network(work);
-  workNet.seedJunctions(net);
-  workNet.rebuild();
+  const workNet = net.fork(work);
   const node = splitSegment(work, workNet, segmentId, splitAt, original.sampleAt(splitAt).p);
   if (node === null || node === segment.a || node === segment.b) {
     return { committed: false, reason: 'geometry' };
@@ -61,7 +59,7 @@ export function commitPedestrianCrossing(
     return { committed: false, reason: 'geometry' };
   }
   doc.takeBack(work);
-  net.adopt(workNet);
+  net.takeBack(workNet);
   return { committed: true, node, segments };
 }
 
@@ -83,9 +81,7 @@ export function commitUturn(doc: RoadDoc, net: Network, segmentId: SegmentId, to
     return { committed: false, reason: 'tooShort' };
   }
   const work = doc.fork();
-  const workNet = new Network(work);
-  workNet.seedJunctions(net);
-  workNet.rebuild();
+  const workNet = net.fork(work);
   const node = splitSegment(work, workNet, segmentId, at, original.sampleAt(at).p);
   if (node === null || node === segment.a || node === segment.b || work.requireNode(node).incident.length !== 2) {
     return { committed: false, reason: 'geometry' };
@@ -103,6 +99,6 @@ export function commitUturn(doc: RoadDoc, net: Network, segmentId: SegmentId, to
   const fits = [...graph.connectors.values()].some((c) => c.node === node && c.turn === 'uturn' && c.maxBodyClass >= car);
   if (!fits) return { committed: false, reason: 'narrow' };
   doc.takeBack(work);
-  net.adopt(workNet);
+  net.takeBack(workNet);
   return { committed: true, node };
 }
