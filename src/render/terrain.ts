@@ -2476,7 +2476,6 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       if (revision === doc.terrainRevision) return false;
       const firstBuild = revision < 0;
       const previous = index;
-      const before = revision;
       revision = doc.terrainRevision;
       index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
 
@@ -2484,8 +2483,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       const added = doc.terrainStamps.length === previous.stamps.length + 1
         ? doc.terrainStamps[doc.terrainStamps.length - 1]
         : undefined;
-      // The first stamp of a map with none
-      const sameHistory = added !== undefined && stampAppended(previous.stamps, doc.terrainStamps, doc.changes.since(before, ['terrain']));
+      // The same land under them (relief and ground), and the stamps it had: the land moved by the new stamp alone.
+      const sameHistory = added !== undefined && stampAppended(previous.stamps, doc.terrainStamps, previous.relief === index.relief && previous.ground === index.ground);
 
       // The first build worked out off the page (`plateMesh.ts`, as Cesium builds its terrain meshes in a worker)
       const made = firstBuild && prebuilt && doc.terrainStamps.length === 0 ? prebuilt : null;
@@ -2507,7 +2506,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         steep.set(made.steep);
         markAll(steepAttribute);
         geometry.boundingSphere = new Sphere(new Vector3(0, (made.low + made.high) / 2, 0), Math.hypot(TERRAIN_HALF * Math.SQRT2, (made.high - made.low) / 2));
-        lastStamps = doc.terrainStamps;
+        lastStamps = index.stamps;
         if (stroking) { waterStale = true; markWaterDirty(null); } else { waterStale = false; waterDirty = null; rebuildWater(lastStamps); }
         markLand('all');
         return true;
@@ -2545,7 +2544,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         const position = geometry.getAttribute('position');
         for (const i of moved) sphere.expandByPoint(spherePoint.fromBufferAttribute(position, i));
       } else wholePlateMoved();
-      lastStamps = doc.terrainStamps;
+      lastStamps = index.stamps;
       // The water - every pool and river on the map - is the deferred part of a stroke
       if (stroking) {
         waterStale = true;
@@ -2943,9 +2942,8 @@ function pushWetTriangle(
   }
 }
 
-/** Whether the land changed by one stamp added to the stamps it had */
-export function stampAppended(previous: readonly unknown[], now: readonly unknown[], entries: readonly { readonly rects: unknown }[] | null): boolean {
-  if (now.length !== previous.length + 1) return false;
-  if (previous.length > 0) return previous[0] === now[0];
-  return entries !== null && entries.length > 0 && entries.every((c) => c.rects !== null);
+/** Whether the land changed by one stamp added to the stamps it had, over the same land under them (`sameLand`). */
+export function stampAppended(previous: readonly unknown[], now: readonly unknown[], sameLand: boolean): boolean {
+  if (!sameLand || now.length !== previous.length + 1) return false;
+  return previous.length === 0 || previous[0] === now[0];
 }

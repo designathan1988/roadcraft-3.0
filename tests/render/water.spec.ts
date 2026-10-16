@@ -272,13 +272,13 @@ describe('a crater in a map with no stamps', () => {
   it('rewrites only its own box, not the whole map', async () => {
     const { stampAppended } = await import('@render/terrain');
     const crater = { id: 1 };
-    // The bomb's crater, the first stamp of a generated city: one entry, with its rectangle.
-    expect(stampAppended([], [crater], [{ rects: [[0, 0, 10, 10]] }])).toBe(true);
-    // A map opened with one stamp: the diary says "everywhere".
-    expect(stampAppended([], [crater], [{ rects: null }])).toBe(false);
-    expect(stampAppended([], [crater], null)).toBe(false);
+    // The bomb's crater, the first stamp of a generated city, over the same land.
+    expect(stampAppended([], [crater], true)).toBe(true);
+    // The land under the stamps moved too (another relief, other corners): the whole plate.
+    expect(stampAppended([], [crater], false)).toBe(false);
     const old = { id: 0 };
-    expect(stampAppended([old], [old, crater], [{ rects: [[0, 0, 1, 1]] }])).toBe(true);
-    expect(stampAppended([old], [{ id: 9 }, crater], [{ rects: [[0, 0, 1, 1]] }])).toBe(false);
+    expect(stampAppended([old], [old, crater], true)).toBe(true);
+    expect(stampAppended([old], [{ id: 9 }, crater], true)).toBe(false);
+    expect(stampAppended([old], [old], true)).toBe(false);
   });
 });
