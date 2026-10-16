@@ -1,7 +1,8 @@
 import { type Profiler, type ProfilerView } from '@core/profiler';
 
 /** Redrawn four times a second from the last closed window of a second - DO NOT redraw it every frame */
-export function mountProfilerHud(profiler: Profiler, options: { readonly visible?: boolean } = {}): { toggle(): void } {
+/** `shown`: told when it is shown and hidden, so what feeds it runs only while it is seen. */
+export function mountProfilerHud(profiler: Profiler, options: { readonly visible?: boolean; readonly shown?: (on: boolean) => void } = {}): { toggle(): void } {
   const box = document.createElement('div');
   box.className = 'profiler-hud';
   box.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:9999;max-width:560px;max-height:calc(100vh - 16px);overflow:auto;'
@@ -19,13 +20,16 @@ export function mountProfilerHud(profiler: Profiler, options: { readonly visible
   box.append(text, copy);
   document.body.appendChild(box);
   let visible = options.visible ?? true;
-  box.style.display = visible ? 'block' : 'none';
-  profiler.enabled = visible;
+  const show = (): void => {
+    box.style.display = visible ? 'block' : 'none';
+    profiler.enabled = visible;
+    options.shown?.(visible);
+  };
+  show();
 
   const toggle = (): void => {
     visible = !visible;
-    box.style.display = visible ? 'block' : 'none';
-    profiler.enabled = visible;
+    show();
   };
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F9' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); toggle(); }

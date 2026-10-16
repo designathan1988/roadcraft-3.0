@@ -1044,34 +1044,49 @@ export function createSceneRenderer(
   const cameraSolidsKept = cameraSolidsKeeper((b) => floors.floorOf(b), floorBox, FLOOR_READ_REACH);
   /** The roads watched for vanishing from the picture */
   let roadsWatchedAt = 0;
-  let roadsWatchCursor = 0;
+  /** Where the sampling of the roads stands: a live walk of the network's ribbons, never a copy of them. */
+  let roadsWatchWalk: { readonly of: ReadonlyMap<SegmentId, unknown>; walk: Iterator<SegmentId> } | null = null;
   let roadsReported = false;
+  /** The next road sampled, round and round the network's ribbons. */
+  const nextWatched = (net: Network): SegmentId | null => {
+    if (roadsWatchWalk?.of !== net.ribbons) roadsWatchWalk = { of: net.ribbons, walk: net.ribbons.keys() };
+    let next = roadsWatchWalk.walk.next();
+    if (next.done) { roadsWatchWalk.walk = net.ribbons.keys(); next = roadsWatchWalk.walk.next(); }
+    return next.done ? null : next.value;
+  };
+  /** Whether the roads' group draws anything: the first visible mesh with vertices ends the look. */
+  const roadsDrawn = (): boolean => {
+    const stack: Object3D[] = roads ? [roads.group] : [];
+    while (stack.length) {
+      const o = stack.pop()!;
+      if (!o.visible) continue;
+      const mesh = o as Mesh;
+      if (mesh.isMesh && (mesh.geometry.getAttribute('position')?.count ?? 0) > 0) return true;
+      for (const child of o.children) stack.push(child);
+    }
+    return false;
+  };
   const watchRoads = (net: Network): void => {
     const now = performance.now();
     // Not while the world is being rebuilt: until the job lands the new roads have no picture yet by design
     if (now - roadsWatchedAt < 1000 || !reveal.opened || net.doc.segments.size === 0 || worldJob !== null) return;
     roadsWatchedAt = now;
-    let vertices = 0;
-    roads?.group.traverse((o) => {
-      const mesh = o as Mesh;
-      if (mesh.isMesh && mesh.visible) vertices += mesh.geometry.getAttribute('position')?.count ?? 0;
-    });
     let buried: { x: number; y: number; land: number; paved: number } | null = null;
-    const ribbons = [...net.ribbons.values()];
-    for (let k = 0; k < 4 && ribbons.length; k++) {
-      const ribbon = ribbons[(roadsWatchCursor++) % ribbons.length]!;
+    for (let k = 0; k < 4; k++) {
+      const id = nextWatched(net);
+      const ribbon = id === null ? undefined : net.ribbons.get(id);
+      if (!ribbon) break;
       const p = ribbon.full.sampleAt(ribbon.full.length / 2).p;
       const paved = pavedHeightAt(p.x, p.y), land = terrain.renderedHeightAt(p.x, p.y);
       // Under the land on purpose in a tunnel.
       if (net.doc.segment(ribbon.id)?.structure === 'tunnel') continue;
       if (Number.isFinite(paved) && land > paved + m(0.3)) { buried = { x: p.x, y: p.y, land, paved }; break; }
     }
-    const missing = !roads || !roads.group.parent || vertices === 0;
+    const missing = !roads || !roads.group.parent || !roadsDrawn();
     if ((missing || buried) && !roadsReported) {
       roadsReported = true;
       console.error('roads missing from the picture', JSON.stringify({
-        missing, buried, vertices, inWorld: !!roads?.group.parent, worldJob: worldJob !== null,
-        terrainRevision: net.doc.terrainRevision, revision: net.revision,
+        missing, buried, inWorld: !!roads?.group.parent, worldJob: worldJob !== null, segments: net.doc.segments.size,
       }));
     } else if (!missing && !buried) roadsReported = false;
   };

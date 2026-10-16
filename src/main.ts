@@ -591,22 +591,41 @@ const scene: SceneHandle = createSceneRenderer(canvas3d, { x: camera.x, y: camer
 // The surgical profiler (`core/profiler.ts`)
 const profileFrameEnd = wireProfiler();
 function wireProfiler(): () => void {
-  hookProfiler(scene.gl);
   engine.watch(() => doc.changes.version);
-  engine.onRefresh = (name, phase, ms, keys, idle) => profiler.product({ name, phase, ms, keys, idle });
-  mountProfilerHud(profiler, { visible: import.meta.env.DEV });
-  const supported = typeof PerformanceObserver !== 'undefined' ? PerformanceObserver.supportedEntryTypes : [];
-  if (supported.includes('longtask')) {
-    new PerformanceObserver((list) => { for (const entry of list.getEntries()) profiler.longTask(entry.duration); }).observe({ type: 'longtask', buffered: false });
-  }
-  if (supported.includes('measure')) {
-    new PerformanceObserver((list) => {
-      for (const m of list.getEntries()) if (m.name.startsWith('hitch:')) profiler.step(`passo ${m.name.slice(6)}`, m.duration);
-    }).observe({ type: 'measure', buffered: false });
-  }
+  /** The hooks into three and WebGL and the observers, while the HUD is shown; null hidden: nothing of it runs then. */
+  let attached: { readonly unhook: () => void; readonly observers: readonly PerformanceObserver[] } | null = null;
   /** The diary's serial the profiler last read: each frame tells it the changes since. */
   let profiledSerial = doc.changes.version;
+  const shown = (on: boolean): void => {
+    if (on === (attached !== null)) return;
+    if (!on) {
+      attached!.unhook();
+      for (const observer of attached!.observers) observer.disconnect();
+      engine.onRefresh = null;
+      attached = null;
+      return;
+    }
+    engine.onRefresh = (name, phase, ms, keys, idle) => profiler.product({ name, phase, ms, keys, idle });
+    const observers: PerformanceObserver[] = [];
+    const supported = typeof PerformanceObserver !== 'undefined' ? PerformanceObserver.supportedEntryTypes : [];
+    if (supported.includes('longtask')) {
+      const observer = new PerformanceObserver((list) => { for (const entry of list.getEntries()) profiler.longTask(entry.duration); });
+      observer.observe({ type: 'longtask', buffered: false });
+      observers.push(observer);
+    }
+    if (supported.includes('measure')) {
+      const observer = new PerformanceObserver((list) => {
+        for (const m of list.getEntries()) if (m.name.startsWith('hitch:')) profiler.step(`passo ${m.name.slice(6)}`, m.duration);
+      });
+      observer.observe({ type: 'measure', buffered: false });
+      observers.push(observer);
+    }
+    profiledSerial = doc.changes.version;
+    attached = { unhook: hookProfiler(scene.gl), observers };
+  };
+  mountProfilerHud(profiler, { visible: import.meta.env.DEV, shown });
   return (): void => {
+    if (!attached) return;
     const serial = doc.changes.version;
     if (serial > profiledSerial) {
       for (const c of doc.changes.latest(Math.min(serial - profiledSerial, 64))) profiler.change({ kind: c.kind, cause: c.cause, ids: c.ids?.length ?? 0 });
