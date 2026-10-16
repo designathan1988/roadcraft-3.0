@@ -1,5 +1,6 @@
-import { commitGrowth, planOnLot, type LotGrowth } from '@editor/zoning';
-import { type HeightReads, heightTileKey, heightTileReads } from '@render/heightTile';
+import { LOT_READ_REACH, type LotGrowth, commitGrowth, nextLot, planFor } from '@editor/zoning';
+import { HEIGHT_TILE, type HeightReads, heightTileKey, heightTileReads } from '@render/heightTile';
+import { rectAround } from '@world/changes';
 import type { SiteContext } from '@world/buildings/validate';
 import type { Building } from '@world/buildings/types';
 import { RoadDoc } from '@world/doc';
@@ -78,21 +79,21 @@ export class GrowthRun {
       batch.wantTiles.clear();
       batch.wantKeys.clear();
       batch.wantPoints = [];
-      let growth: LotGrowth | null;
+      const next = nextLot(this.doc, this.refused, ask.seed);
+      if (!next) { done = true; break; }
+      // The squares the lot reads asked before it is planned: a plan is made once, on the page's heights.
+      wantSquares(batch, next.lot);
+      if (wanting(batch)) return this.need(batch);
+      let growth: LotGrowth;
       try {
-        growth = planOnLot(ctx, this.refused, ask.seed);
+        growth = planFor(ctx, next.lot, next.rng);
       } catch (error) {
         // Led astray by a reading that only stood in: made again once it is known.
         if (!wanting(batch)) throw error;
-        growth = null;
+        return this.need(batch);
       }
-      if (wanting(batch)) {
-        if (++batch.rounds > MOST_ROUNDS) throw new Error(`a lot still wanted heights after ${MOST_ROUNDS} rounds`);
-        batch.asked = batch.wantPoints;
-        return { kind: 'need', seq: ask.seq, tiles: [...batch.wantTiles], points: Float64Array.from(batch.wantPoints) };
-      }
+      if (wanting(batch)) return this.need(batch);
       batch.rounds = 0;
-      if (!growth) { done = true; break; }
       const stored = commitGrowth(ctx, growth, this.refused, ask.stamp);
       if (stored) {
         batch.buildings.push(stored);
@@ -101,6 +102,13 @@ export class GrowthRun {
     }
     this.batch = null;
     return { kind: 'grown', seq: ask.seq, buildings: batch.buildings, lots: batch.lots, refused: batch.refused, done, ms: performance.now() - batch.started };
+  }
+
+  /** The heights wanted asked of the page; a lot that keeps wanting is given up on. */
+  private need(batch: Batch): FromGrowth {
+    if (++batch.rounds > MOST_ROUNDS) throw new Error(`a lot still wanted heights after ${MOST_ROUNDS} rounds`);
+    batch.asked = batch.wantPoints;
+    return { kind: 'need', seq: batch.ask.seq, tiles: [...batch.wantTiles], points: Float64Array.from(batch.wantPoints) };
   }
 
   /** A height the plan reads: from the squares handed over, or a point the page told; else wanted, a stand-in given meanwhile. */
@@ -127,5 +135,17 @@ export class GrowthRun {
 
 /** A point's reading as a key: the exact numbers (a double's shortest text round-trips it). */
 const pointKey = (kind: number, x: number, y: number): string => `${kind} ${x} ${y}`;
+
+/** The squares under a lot and its street floor (`LOT_READ_REACH`) not handed over yet, wanted. */
+function wantSquares(batch: Batch, lot: Lot): void {
+  const box = rectAround(lot.corners);
+  if (!box) return;
+  for (let x = Math.floor((box[0] - LOT_READ_REACH) / HEIGHT_TILE); x <= Math.floor((box[2] + LOT_READ_REACH) / HEIGHT_TILE); x++) {
+    for (let y = Math.floor((box[1] - LOT_READ_REACH) / HEIGHT_TILE); y <= Math.floor((box[3] + LOT_READ_REACH) / HEIGHT_TILE); y++) {
+      const key = heightTileKey(x * HEIGHT_TILE, y * HEIGHT_TILE);
+      if (!batch.tiles.has(key)) batch.wantTiles.add(key);
+    }
+  }
+}
 
 const wanting = (batch: Batch): boolean => batch.wantTiles.size > 0 || batch.wantPoints.length > 0;

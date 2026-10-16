@@ -193,7 +193,12 @@ export function commitGrowth(ctx: SiteContext, growth: LotGrowth, refused: Set<n
 
 /** @perItem The growth of the next open lot worked out, nothing written (`commitGrowth` writes it): nothing it reaches may walk the map. */
 export function planOnLot(ctx: SiteContext, refused: Set<number>, seed: number): LotGrowth | null {
-  const { doc } = ctx;
+  const next = nextLot(ctx.doc, refused, seed);
+  return next ? planFor(ctx, next.lot, next.rng) : null;
+}
+
+/** The open lot grown next and the draws it is grown with (`planFor`); null, none is open. */
+export function nextLot(doc: RoadDoc, refused: Set<number>, seed: number): { readonly lot: Lot; readonly rng: Rng } | null {
   // The open lots kept by the document (`world/openLots.ts`)
   const open = doc.openLots;
   const count = open.count(refused);
@@ -210,6 +215,15 @@ export function planOnLot(ctx: SiteContext, refused: Set<number>, seed: number):
       if (d < best - m(0.001)) { best = d; lot = l; }
     }
   }
+  return { lot, rng };
+}
+
+/** How far past its lot's corners a lot's growth reads the ground: the street floor in front of it (`streetFloor`), a margin. */
+export const LOT_READ_REACH = m(8);
+
+/** @perItem The growth of one lot worked out with the draws of `nextLot`, nothing written (`commitGrowth` writes it). */
+export function planFor(ctx: SiteContext, lot: Lot, rng: Rng): LotGrowth {
+  const { doc } = ctx;
   const use = lot.use!;
   const frame = lotBuildFrame(lot);
   // Every zoned lot gets a building, whatever its size or shape (the player, 2026-10-05: "it always has to appear").
