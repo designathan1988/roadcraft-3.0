@@ -25,7 +25,10 @@ function parkedCar(id: number, x: number, y: number, lot: number | undefined = 1
 
 /** The simulation as the page sees it (`SimMirror`): no traffic, the parked cars, nobody walking. */
 function worldWith(parked: readonly ShownVehicle[]): SimMirror {
-  return { tick: 0, road: [], parked: new Map(parked.map((v) => [v.id, v])), pedViews: [], fleetVersion: 0, has: () => true } as unknown as SimMirror;
+  return {
+    tick: 0, road: [], parked: new Map(parked.map((v) => [v.id, v])), pedViews: [], fleetVersion: 0, has: () => true,
+    parkedIn: (_inView: unknown, out: ShownVehicle[]) => { out.push(...parked); },
+  } as unknown as SimMirror;
 }
 
 /** The network as `sync` reads it: the diary of changes. */

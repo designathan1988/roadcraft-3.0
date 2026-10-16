@@ -21,6 +21,7 @@ import {
 } from 'three';
 
 import { newPose, pedPoseInto } from '@sim/pose';
+import { TERRAIN_MAX_HEIGHT, TERRAIN_MIN_HEIGHT } from '@world/terrain';
 import { roadFrameInto } from './vehicleFrame';
 import {
   ARCHETYPES,
@@ -81,6 +82,10 @@ const OCCUPANT_ZOOM = perM(3);
 const VEHICLE_HYSTERESIS = 0.1;
 /** A car's length, for the smallest scale anything is drawn at (2 px). */
 const CAR_LENGTH = m(4.5);
+/** How far past its cell a parked car's body and shadow reach, and the heights a car in a bay can stand at (the terrain's range, a deck over it). */
+const PARKED_REACH = m(16);
+const PARKED_LOW = TERRAIN_MIN_HEIGHT;
+const PARKED_HIGH = TERRAIN_MAX_HEIGHT + m(60);
 /** At most this many vehicles whole at once: past it, the smallest on the screen are drawn a level down. */
 const VEHICLE_NEAR_CAP = 200;
 
@@ -120,6 +125,8 @@ interface AgentRenderOptions {
   readonly personPixels?: (x: number, y: number, z: number, height: number) => number;
   /** Pixels a world unit across the screen at (x, y, z): each vehicle's level of detail. */
   readonly screenScale?: (x: number, y: number, z: number) => number;
+  /** The most pixels a world unit spans anywhere in the box (heights `lo` to `hi`), 0 when it is off the view: the parked cars' cells. */
+  readonly areaPixels?: (minX: number, minY: number, maxX: number, maxY: number, lo: number, hi: number) => number;
   /** Whether shadows are drawn at all (the quality tier): the far ones' soft discs follow it. */
   readonly shadows?: boolean;
 }
@@ -1007,6 +1014,8 @@ export function createAgentMeshes(elevationAt: ElevationAt, onAssetsReady: () =>
   const blobMatrix = new Matrix4();
   /** This frame's whole-level candidates' lengths on the screen, and the least one may have (last frame's cap). */
   const nearCandidates: number[] = [];
+  /** The cars in bays in the cells in view, gathered each frame (`SimMirror.parkedIn`). */
+  const parkedInView: SimVehicle[] = [];
   let nearFloor = 0;
   /** Whether a two-wheeler was drawn whole last frame: then they all cast into the shadow map */
   let bikesWhole = false;
@@ -1627,8 +1636,13 @@ export function createAgentMeshes(elevationAt: ElevationAt, onAssetsReady: () =>
       let bikesWholeNow = false, carsWheeled = false;
       vehicleBlobs.begin();
       if (suspensionFrame % 600 === 0) for (const [id, entry] of parkedDraws) if (suspensionFrame - entry.seen > 120) parkedDraws.delete(id);
-      // The traffic, then the scenery's cars parked in their bays, on the ground of the lot.
-      for (const list of [world.road, world.parked.values()]) for (const vehicle of list) {
+      // The traffic, then the scenery's cars parked in their bays in the cells in view (grown by a shadow's reach), on the ground of the lot.
+      parkedInView.length = 0;
+      const areaPixels = options.areaPixels;
+      world.parkedIn(areaPixels
+        ? (x0, y0, x1, y1) => areaPixels(x0 - PARKED_REACH, y0 - PARKED_REACH, x1 + PARKED_REACH, y1 + PARKED_REACH, PARKED_LOW, PARKED_HIGH) * CAR_LENGTH >= 2
+        : () => true, parkedInView);
+      for (const list of [world.road, parkedInView]) for (const vehicle of list) {
         // Off the road and not moving (the town's parked cars): where it is, with none of the interpolation's sums.
         const at = vehicle.free;
         const pose = POSE;

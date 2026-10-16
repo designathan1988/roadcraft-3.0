@@ -48,6 +48,12 @@ export interface ShownController {
   sub: string;
 }
 
+/** Side of the cells the vehicles are filed in for the draw and the bodies (`parkedIn`, `roadIn`), world units. */
+const VEHICLE_CELL = 128;
+/** The cell of a point, as one number (`VEHICLE_CELL` cells, ±2^15 of them each way). */
+const cellKey = (ix: number, iy: number): number => (ix + 32768) * 65536 + (iy + 32768);
+const cellOf = (x: number, y: number): number => cellKey(Math.floor(x / VEHICLE_CELL), Math.floor(y / VEHICLE_CELL));
+
 /** A vehicle's pose `alpha` of the way through the tick, into `out`. */
 export function shownPoseInto(v: ShownVehicle, alpha: number, out: PoseOut): void {
   blendPoseEnds(v.ends, Math.min(1, Math.max(0, alpha)), out);
@@ -71,6 +77,12 @@ export class SimMirror {
   readonly casualties = new CasualtyBook();
   stats: FrameStats = { vehicles: 0, lotsMoving: 0, peds: 0, trips: 0, lost: 0, speedSum: 0, queued: 0 };
   private readonly vehicles = new Map<VehicleId, ShownVehicle>();
+  /** The cars in bays by cell, and the cell each is filed in: the draw reads only the cells in view. */
+  private readonly parkedCells = new Map<number, Set<ShownVehicle>>();
+  private readonly parkedCell = new Map<VehicleId, number>();
+  /** The vehicles on the roads by cell, filed when first asked in a tick (`roadIn`). */
+  private readonly roadCells = new Map<number, ShownVehicle[]>();
+  private roadFiled = -1;
   private readonly onRoad = new Set<VehicleId>();
   private readonly peds = new Map<number, PedView>();
   private readonly junctions = new Map<NodeId, JunctionSignal['groups']>();
@@ -121,22 +133,80 @@ export class SimMirror {
     if (frame.parkedWhole) {
       for (const id of this.parked.keys()) if (!road.has(id)) this.vehicles.delete(id);
       this.parked.clear();
+      this.parkedCells.clear();
+      this.parkedCell.clear();
       changed = true;
     }
     for (const id of frame.parkedGone) {
       if (!this.parked.delete(id)) continue;
+      this.unfile(id);
       changed = true;
       if (!road.has(id)) this.vehicles.delete(id);
     }
     for (let k = 0; k < frame.parkedCount; k++) {
       const v = this.read(frame.parked, k * VEHICLE_STRIDE, looks);
-      if (!this.parked.has(v.id)) { this.parked.set(v.id, v); changed = true; }
+      if (this.parked.get(v.id) !== v) { if (!this.parked.has(v.id)) changed = true; this.parked.set(v.id, v); this.unfile(v.id); }
+      this.file(v);
     }
     // A vehicle on the roads that went into a bay is no longer on the list of the roads, and the other way round.
-    for (const id of road) this.parked.delete(id);
+    for (const id of road) if (this.parked.delete(id)) this.unfile(id);
     if (changed) this.fleetVersion++;
     this.takePeds(frame);
     this.takeSignals(frame);
+  }
+
+  /** The cars in bays in the cells `inView` keeps (given each cell's box), into `out`. */
+  parkedIn(inView: (minX: number, minY: number, maxX: number, maxY: number) => boolean, out: ShownVehicle[]): void {
+    for (const [key, cars] of this.parkedCells) {
+      const ix = Math.floor(key / 65536) - 32768, iy = (key % 65536) - 32768;
+      if (inView(ix * VEHICLE_CELL, iy * VEHICLE_CELL, (ix + 1) * VEHICLE_CELL, (iy + 1) * VEHICLE_CELL)) for (const car of cars) out.push(car);
+    }
+  }
+
+  /** The cars in bays whose cell meets the box. */
+  *parkedNear(minX: number, minY: number, maxX: number, maxY: number): Generator<ShownVehicle> {
+    for (let ix = Math.floor(minX / VEHICLE_CELL); ix <= Math.floor(maxX / VEHICLE_CELL); ix++) {
+      for (let iy = Math.floor(minY / VEHICLE_CELL); iy <= Math.floor(maxY / VEHICLE_CELL); iy++) yield* this.parkedCells.get(cellKey(ix, iy)) ?? [];
+    }
+  }
+
+  /** The vehicles on the roads whose cell (where they are at the end of the tick) meets the box: filed once a tick, when first asked. */
+  *roadNear(minX: number, minY: number, maxX: number, maxY: number): Generator<ShownVehicle> {
+    if (this.roadFiled !== this.tick) {
+      this.roadFiled = this.tick;
+      this.roadCells.clear();
+      for (const v of this.road) {
+        const key = cellOf(v.ends.x1, v.ends.y1);
+        const list = this.roadCells.get(key);
+        if (list) list.push(v);
+        else this.roadCells.set(key, [v]);
+      }
+    }
+    for (let ix = Math.floor(minX / VEHICLE_CELL); ix <= Math.floor(maxX / VEHICLE_CELL); ix++) {
+      for (let iy = Math.floor(minY / VEHICLE_CELL); iy <= Math.floor(maxY / VEHICLE_CELL); iy++) yield* this.roadCells.get(cellKey(ix, iy)) ?? [];
+    }
+  }
+
+  /** A car in a bay filed in the cell it stands in now. */
+  private file(v: ShownVehicle): void {
+    const key = v.free ? cellOf(v.free.x, v.free.y) : cellOf(v.ends.x1, v.ends.y1);
+    const was = this.parkedCell.get(v.id);
+    if (was === key) return;
+    if (was !== undefined) this.unfile(v.id);
+    this.parkedCell.set(v.id, key);
+    const cars = this.parkedCells.get(key);
+    if (cars) cars.add(v);
+    else this.parkedCells.set(key, new Set([v]));
+  }
+
+  private unfile(id: VehicleId): void {
+    const key = this.parkedCell.get(id);
+    if (key === undefined) return;
+    this.parkedCell.delete(id);
+    const cars = this.parkedCells.get(key);
+    if (!cars) return;
+    for (const car of cars) if (car.id === id) { cars.delete(car); break; }
+    if (!cars.size) this.parkedCells.delete(key);
   }
 
   /** Whether the last frame moved anything that can be seen: vehicles, cars parking, people, a signal's lamps, trains. */

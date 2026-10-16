@@ -773,6 +773,20 @@ export function createSceneRenderer(
     vehicleBounds.radius = radius;
     return crowdFrustum.intersectsSphere(vehicleBounds);
   };
+  /** The most pixels a world unit spans in a box: at one of its corners (the depth is affine, its inverse convex), unbounded when one is behind the eye. */
+  const areaBox = new Box3(), cameraForward = new Vector3(), cornerFromEye = new Vector3();
+  const areaPixels = (minX: number, minY: number, maxX: number, maxY: number, lo: number, hi: number): number => {
+    areaBox.min.set(minX, lo, -maxY);
+    areaBox.max.set(maxX, hi, -minY);
+    if (!crowdFrustum.intersectsBox(areaBox)) return 0;
+    let most = 0;
+    for (let k = 0; k < 8; k++) {
+      const x = k & 1 ? maxX : minX, y = k & 2 ? maxY : minY, z = k & 4 ? hi : lo;
+      if (cornerFromEye.set(x, z, -y).sub(rig.camera.position).dot(cameraForward) <= 0) return Infinity;
+      most = Math.max(most, screenScale(x, y, z));
+    }
+    return most;
+  };
   scene.add(...agents.meshes);
   const signals: SignalHeads = createSignalHeads(scene, deckHeight);
 
@@ -2611,6 +2625,7 @@ export function createSceneRenderer(
       crowdProjection.multiplyMatrices(cullCamera.projectionMatrix, cullCamera.matrixWorldInverse);
       crowdFrustum.setFromProjectionMatrix(crowdProjection, cullCamera.coordinateSystem, cullCamera.reversedDepth);
       cameraRight.setFromMatrixColumn(cullCamera.matrixWorld, 0).normalize();
+      cameraForward.setFromMatrixColumn(cullCamera.matrixWorld, 2).normalize().negate();
       // The canvas's CSS size read once a frame, before the vehicles ask `screenScale`
       cssHalfW = renderer.domElement.clientWidth * 0.5;
       cssHalfH = renderer.domElement.clientHeight * 0.5;
@@ -2627,6 +2642,7 @@ export function createSceneRenderer(
         pedestrianVisible,
         personPixels,
         screenScale,
+        areaPixels,
         shadows: renderer.shadowMap.enabled,
         eye: cullCamera.position,
         vehicleVisible,

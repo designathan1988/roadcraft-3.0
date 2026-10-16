@@ -60,6 +60,18 @@ describe('the mirror of the simulation', () => {
       // A frame asks to be drawn for its signals only when a lamp or a signalled junction changed.
       if (mirror.signalsMoved) lampsMoved++;
       if (tick % 5) continue;
+      // The cells the draw and the bodies read: every car in a bay filed once, where it stands; a box finds what a walk of all would.
+      const filed: number[] = [];
+      mirror.parkedIn(() => true, filed as never);
+      expect(filed.length).toBe(mirror.parked.size);
+      for (const [x, y] of [[0, 0], [150, -90], [-300, 220]] as const) {
+        const r = 60;
+        const near = (vx: number, vy: number): boolean => Math.abs(vx - x) <= r && Math.abs(vy - y) <= r;
+        const bays = [...mirror.parkedNear(x - r, y - r, x + r, y + r)].filter((v) => near(v.free!.x, v.free!.y)).map((v) => v.id).sort();
+        expect(bays).toEqual([...mirror.parked.values()].filter((v) => v.free && near(v.free.x, v.free.y)).map((v) => v.id).sort());
+        const roads = [...mirror.roadNear(x - r, y - r, x + r, y + r)].filter((v) => near(v.ends.x1, v.ends.y1)).map((v) => v.id).sort();
+        expect(roads).toEqual(mirror.road.filter((v) => near(v.ends.x1, v.ends.y1)).map((v) => v.id).sort());
+      }
       // The vehicles on the roads: the same, in the same order, at the same pose for any share of the tick.
       const road = sim.vehiclesInIdOrder().filter((v) => vehiclePoseInto(sim, v, 1, real));
       expect(mirror.road.map((v) => v.id)).toEqual(road.map((v) => v.id));
