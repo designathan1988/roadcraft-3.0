@@ -23,6 +23,7 @@ import {
   Sphere,
   Box3,
   Vector3,
+  type Frustum,
   type Material,
   type Object3D,
   type Texture,
@@ -183,6 +184,10 @@ export interface TerrainSurface {
   setVegetation?(amount: number): void;
   /** The woods' density but the ecosystem's share per cell, made off the page with the plate's first build */
   woodsBase?(): Float32Array | null;
+  /** Keeps the plate's buffers and own textures on the GPU (true) or lets them go (false); its arrays stay, sent whole when it is next drawn */
+  keepOnGpu?(keep: boolean): void;
+  /** Once a frame, with the camera's frustum: the plates out of view let go of their GPU copies (`keepOnGpu`). */
+  cull?(frustum: Frustum): void;
   dispose(): void;
 }
 
@@ -1980,9 +1985,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
 
   // ---- the ecosystem (world/ecology.ts)
   const ecologyTexture = material.userData['ecology'] as DataTexture;
-  /** The biomes painted per corner, `REGIONS.length` weights a corner (`rasterBiome`). */
-  const biomeCorners = new Float32Array(GRID * GRID * REGIONS.length);
-  let biomePainted = false;
+  /** The biomes painted per corner, `REGIONS.length` weights a corner (`rasterBiome`): made by the first biome dab, null while none is (2.5 MB a plate). */
+  let biomeCorners: Float32Array | null = null;
   let nature: NatureSettings | null = null;
   let natureSeen = -1;
   let ecologyField: EcologyField | null = null;
@@ -2028,7 +2032,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       const input = {
         side: GRID, cell: TERRAIN_CELL, heights: Float64Array.from(natural), water: wet,
         sandstone: Float32Array.from(sand), basalt: Float32Array.from(basalt),
-        painted: biomePainted ? Float32Array.from(biomeCorners) : null, settings: nature,
+        painted: biomeCorners ? Float32Array.from(biomeCorners) : null, settings: nature,
       };
       const transfer: ArrayBuffer[] = [input.heights.buffer, wet.buffer, input.sandstone.buffer, input.basalt.buffer];
       if (input.painted) transfer.push(input.painted.buffer);
@@ -2068,7 +2072,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     const field = computeEcology({
       side: GRID, cell: TERRAIN_CELL, heights: natural, water: wet,
       sandstone: material.userData['sandCorners'] as Float32Array, basalt: material.userData['basaltCorners'] as Float32Array,
-      painted: biomePainted ? biomeCorners : null, settings: nature,
+      painted: biomeCorners, settings: nature,
     }, over && ecologyField ? { previous: ecologyField, ix0: over[0], ix1: over[1], iy0: over[2], iy1: over[3] } : undefined);
     performance.measure('hitch:ecology', { start: startedAt, end: performance.now() });
     applyEcology(field);
@@ -2225,10 +2229,17 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     paint = [paintLayer(next, 0), paintLayer(next, 1)];
     lightLayer = paintLayer(next, LIGHT_LAYER);
     small.dispose();
-    // The new array goes whole when first drawn.
+    // The new array goes whole when first drawn, its light layer with it.
+    watchPaint(next);
+    paintWhole = true;
     paintDirty = null;
     lightDirty = null;
   };
+  /** Whether the array's next upload must be whole (grown, or let go): three.js r186 sends only the layers waiting, when any are. */
+  let paintWhole = false;
+  const watchPaint = (texture: DataArrayTexture): void => { texture.onUpdate = () => { paintWhole = false; }; };
+  watchPaint(paintArray);
+  // As made, its light layer alone goes: WebGL starts a texture at zero, as the painted layers are.
   paintArray.addLayerUpdate(LIGHT_LAYER);
   paintArray.needsUpdate = true;
   /** DO NOT send a whole layer of the painted ground (4 MB) for a dab: the texels written since the last frame, a box of layers 0-1 and one of the light's. */
@@ -2241,6 +2252,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
   /** The boxes written since the last frame, sent before it is drawn (`bakeRelief`). */
   const sendPaint = (renderer: WebGLRenderer): void => {
     if (!paintDirty && !lightDirty) return;
+    // The whole array goes when next drawn, these boxes in it: a box copied now would send it whole first (`copyTextureToTexture`).
+    if (paintWhole) { paintDirty = null; lightDirty = null; return; }
     if (paintSource?.image.data !== paintArray.image.data) paintSource = new DataTexture(paintArray.image.data, paintRes, paintRes, RGBAFormat, UnsignedByteType);
     for (const [box, z0, z1] of [[paintDirty, 0, 1], [lightDirty, LIGHT_LAYER, LIGHT_LAYER]] as const) {
       if (!box) continue;
@@ -2365,8 +2378,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         return;
       }
       if (isBiomeKind(dab.kind)) {
-        rasterBiome(biomeCorners, dab);
-        biomePainted = true;
+        rasterBiome(biomeCorners ??= new Float32Array(GRID * GRID * REGIONS.length), dab);
         ecologyAll();
         return;
       }
@@ -2387,8 +2399,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       for (const kind of COVER_KINDS) covers[kind].fill(0);
       sandCorners.fill(0);
       basaltCorners.fill(0);
-      biomeCorners.fill(0);
-      biomePainted = false;
+      biomeCorners = null;
       ecologyAll();
       for (const dab of dabs) lay(dab);
       covered = true;
@@ -2401,8 +2412,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     if (covered) {
       forestRevision++;
       if (!added) {
-        paintArray.addLayerUpdate(0);
-        paintArray.addLayerUpdate(1);
+        // DO NOT name the layers on an array that goes whole: its light layer (a plate's first dab grows it) was left out.
+        if (!paintWhole) { paintArray.addLayerUpdate(0); paintArray.addLayerUpdate(1); }
         paintArray.needsUpdate = true;
         paintDirty = null;
       }
@@ -2420,6 +2431,30 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       }
     }
     if (box) packShore(added ? box : null);
+  };
+
+  /** Whether the plate's GPU copies are kept (`keepOnGpu`). */
+  let onGpu = true;
+  const keepOnGpu = (keep: boolean): void => {
+    if (keep === onGpu) return;
+    onGpu = keep;
+    if (keep) return;
+    // DO NOT leave ranges or layers waiting: three.js r186 would send only those into a fresh texture, and again after a fresh buffer.
+    for (const attribute of Object.values(geometry.attributes)) (attribute as BufferAttribute).clearUpdateRanges();
+    triangles.clearUpdateRanges();
+    // Disposed on the GPU only (WebGLGeometries, WebGLTextures): the arrays stay, and the materials keep their programs.
+    geometry.dispose();
+    water.geometry.dispose();
+    paintArray.clearLayerUpdates();
+    paintArray.dispose();
+    paintWhole = true;
+    paintDirty = null;
+    lightDirty = null;
+    shore.clearUpdateRanges();
+    shore.dispose();
+    shoreWhole = true;
+    ecologyTexture.dispose();
+    groundTexture.dispose();
   };
 
   const parts: TerrainPart[] = [];
@@ -2620,6 +2655,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       return true;
     },
     woodsBase: () => woods,
+    keepOnGpu,
     dispose() {
       disposed = true;
       geometry.dispose();

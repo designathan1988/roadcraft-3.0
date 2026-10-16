@@ -81,9 +81,12 @@ describe('a plate edited by the brush', () => {
     atlas.updatePaint(doc as never);
     const s = home(atlas);
     const shore = userData(s)['shore'] as DataTexture;
+    const paint = userData(s)['paint'] as DataArrayTexture;
+    // The first dab grew the array: it goes whole, its light layer too (three.js r186 would send only the layers named).
+    expect(paint.layerUpdates.size).toBe(0);
     // Sent whole once (three.js calls `onUpdate` after an upload).
     shore.onUpdate?.(shore);
-    const paint = userData(s)['paint'] as DataArrayTexture;
+    paint.onUpdate?.(paint);
     const paintVersion = paint.version, shoreVersion = shore.version;
     const copies: { min: number[]; max: number[] }[] = [];
     const renderer = { copyTextureToTexture: (_src: unknown, _dst: unknown, region: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }) => {
@@ -119,6 +122,23 @@ describe('a plate edited by the brush', () => {
     for (const key of ['flowerCorners', 'scrubCorners', 'forestCorners', 'sandCorners', 'basaltCorners']) {
       expect(firstDiff(userData(s)[key] as Float32Array, userData(f)[key] as Float32Array)).toBe(-1);
     }
+  });
+
+  it('reads the biomes painted, and once the paint is cleared reads the land as a plate never painted', () => {
+    const doc = new RoadDoc();
+    const source = (terrainPaint: PaintDab[], paintRevision: number): TerrainSource => ({
+      changes: doc.changes, terrainRevision: 1, terrainStamps: [], terrainRelief: RELIEF_NATURAL, natureRevision: 1, nature: { region: 'cerrado', seed: 7 }, paintRevision, terrainPaint,
+    });
+    const plain = createTerrainSurface(1, { x: 0, y: 0 }, 12);
+    plain.update(source([], 1), false);
+    plain.updatePaint(source([], 1));
+    const painted = createTerrainSurface(1, { x: 0, y: 0 }, 12);
+    painted.update(source([], 1), false);
+    painted.updatePaint(source([{ id: 1, kind: 'amazon', x: 0, y: 0, radius: 300, strength: 1 } as PaintDab], 1));
+    expect(firstDiff(painted.ecology()!.region, plain.ecology()!.region)).not.toBe(-1);
+    painted.updatePaint(source([], 2));
+    const a = painted.ecology()!, b = plain.ecology()!;
+    for (const key of ['canopy', 'trees', 'grass', 'dry', 'wet', 'region'] as const) expect(firstDiff(a[key], b[key])).toBe(-1);
   });
 
   it('keeps the plate made off the page when stamps are on it, and lays them on it', () => {
