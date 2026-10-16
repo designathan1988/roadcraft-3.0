@@ -52,11 +52,13 @@ describe('the mirror of the simulation', () => {
     const writer = new FrameWriter();
     const mirror = new SimMirror();
     const real = newPose(), shown = newPose();
-    let vehicles = 0, parked = 0, peds = 0, heads = 0, signalling = 0;
+    let vehicles = 0, parked = 0, peds = 0, heads = 0, signalling = 0, lampsMoved = 0;
     for (let tick = 0; tick < 300; tick++) {
       step(sim, { traffic: true, pedestrians: true });
       // Cloned as the worker's message is (`postMessage`).
       mirror.take(structuredClone(writer.write(sim)));
+      // A frame asks to be drawn for its signals only when a lamp or a signalled junction changed.
+      if (mirror.signalsMoved) lampsMoved++;
       if (tick % 5) continue;
       // The vehicles on the roads: the same, in the same order, at the same pose for any share of the tick.
       const road = sim.vehiclesInIdOrder().filter((v) => vehiclePoseInto(sim, v, 1, real));
@@ -104,5 +106,7 @@ describe('the mirror of the simulation', () => {
     expect(parked).toBeGreaterThan(100);
     expect(peds).toBeGreaterThan(5_000);
     expect(heads).toBeGreaterThan(0);
+    expect(lampsMoved).toBeGreaterThan(0);
+    expect(lampsMoved).toBeLessThan(150);
   }, 10_000);
 });

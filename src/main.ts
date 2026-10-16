@@ -2,7 +2,6 @@ import { profileOf } from '@world/roads/profile';
 import { profiler } from '@core/profiler';
 import { mountProfilerHud } from '@ui/profilerHud';
 import { hookProfiler } from '@render/profilerHooks';
-import { hasTransit } from '@world/transit';
 import { mountCompass, northOnScreen, northTurn, type Compass } from '@ui/v2/compass';
 import { flipProfile, streetChain } from '@world/roads/streetChain';
 import { furnitureChosen } from '@ui/roads/furnitureChoice';
@@ -2397,16 +2396,10 @@ function frame(now: number): void {
   profileFrameEnd();
 
   // Keep animating while anything is moving; otherwise settle.
-  const simMoving = !game.paused && simShowsMotion();
+  const simMoving = !game.paused && shown.showsMotion();
   if (!document.hidden && (simMoving || roadTool.draft || mover.dragging || cameraHand.active || cameraHand.coasting || cameraMotion.moving || scene.busy())) requestDraw();
   // Only the clouds moving (they drift, form and fade), or the clock alone: a slower frame.
   else if (!document.hidden && (!game.paused || scene.drifting())) frameClock.drift();
-}
-
-/** Whether anything the simulation moves can be seen moving: vehicles, cars parking, people, signals, public transport. */
-function simShowsMotion(): boolean {
-  const stats = shown.stats;
-  return stats.vehicles > 0 || stats.peds > 0 || stats.lotsMoving > 0 || stats.controllers > 0 || hasTransit(doc.transit);
 }
 
 /** The same hints as `drawOverlay`, projected instead of transformed. */

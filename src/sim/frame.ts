@@ -68,7 +68,6 @@ export interface FrameStats {
   readonly vehicles: number;
   readonly lotsMoving: number;
   readonly peds: number;
-  readonly controllers: number;
   readonly trips: number;
   readonly lost: number;
   readonly speedSum: number;
@@ -184,7 +183,7 @@ export class FrameWriter {
       wounds: takeWounds(w),
       casualties: takeCasualties(w),
       stats: {
-        vehicles: w.vehicles.size, lotsMoving: w.city.lots.moving(), peds: w.pedViews.length, controllers: w.controllers.size,
+        vehicles: w.vehicles.size, lotsMoving: w.city.lots.moving(), peds: w.pedViews.length,
         trips: w.completedTrips, lost: w.entryDemandLost, speedSum, queued,
       },
     };

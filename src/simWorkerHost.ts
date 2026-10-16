@@ -193,7 +193,8 @@ export class WorkerSimHost implements SimHost {
     if (m.issuesWhole) this.issueList.length = 0;
     for (const issue of m.issues) this.issueList.push(issue);
     if (m.measured) for (const [key, table] of m.measured) this.measured.set(key, table);
-    if (m.hold || !this.current.paused || this.outWork) this.arrived();
+    // Drawn when something it moved can be seen; the clock alone waits for the page's own slower frame.
+    if (m.hold || this.outWork || this.shown.showsMotion()) this.arrived();
   }
 
   private send(message: ToSim): void {

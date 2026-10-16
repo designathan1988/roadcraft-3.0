@@ -62,12 +62,14 @@ export class SimMirror {
   readonly parked = new Map<VehicleId, ShownVehicle>();
   /** Moves whenever a vehicle comes or goes (the casting of their people reads it, `render/agents.ts`). */
   fleetVersion = 0;
+  /** Whether the last frame changed a signal's lamps or the junctions that have one. */
+  signalsMoved = false;
   readonly pedViews: PedView[] = [];
   trains: readonly TrainView[] = [];
   /** The bullet wounds not yet drawn (`takeWounds`), and the people struck, as long as they are drawn. */
   readonly wounds: { id: number; part: BodyPart; fromX: number; fromY: number }[] = [];
   readonly casualties = new CasualtyBook();
-  stats: FrameStats = { vehicles: 0, lotsMoving: 0, peds: 0, controllers: 0, trips: 0, lost: 0, speedSum: 0, queued: 0 };
+  stats: FrameStats = { vehicles: 0, lotsMoving: 0, peds: 0, trips: 0, lost: 0, speedSum: 0, queued: 0 };
   private readonly vehicles = new Map<VehicleId, ShownVehicle>();
   private readonly onRoad = new Set<VehicleId>();
   private readonly peds = new Map<number, PedView>();
@@ -135,6 +137,12 @@ export class SimMirror {
     if (changed) this.fleetVersion++;
     this.takePeds(frame);
     this.takeSignals(frame);
+  }
+
+  /** Whether the last frame moved anything that can be seen: vehicles, cars parking, people, a signal's lamps, trains. */
+  showsMotion(): boolean {
+    const s = this.stats;
+    return s.vehicles > 0 || s.peds > 0 || s.lotsMoving > 0 || this.signalsMoved || this.trains.length > 0;
   }
 
   /** The vehicle of the record at `at`, made when new, its numbers taken in. */
@@ -208,6 +216,7 @@ export class SimMirror {
   }
 
   private takeSignals(frame: SimFrame): void {
+    this.signalsMoved = frame.signalsWhole || frame.signals.length > 0 || frame.junctions.length > 0;
     if (frame.signalsWhole) { this.junctions.clear(); this.controllers.clear(); }
     for (const plan of frame.plans) this.plans.set(plan.id, plan);
     const nodes: NodeId[] = [];
