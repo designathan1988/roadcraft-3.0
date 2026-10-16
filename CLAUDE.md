@@ -167,9 +167,6 @@ Player's decisions
 - Caps that delete the player's work: `MAX_PLANTED_TREES = 20_000` (`doc.ts:1334`), elements
   (`:1381`), undo dropping old steps by bytes (`history.ts:128`).
 - About 7 KB per building record (560 MB at 80,000 buildings); seed + lot would change the generator.
-- Road surface triangles of the fixed scene `tests/fixtures/grid-and-bends.json` fell from 275,691
-  to 133,500 (`tests/perf/budgets.spec.ts` fails its minimum): either the roads are built another
-  way or they lost detail. Needs before/after shots of the same views and the player's call.
 
 Memory measured (heap snapshots, SwiftShader, `scratchpad` probes; 2026-10-16):
 - At boot, no city: 63 MB of JS objects and 604 MB of array buffers, all held by JS (the 235 MB
