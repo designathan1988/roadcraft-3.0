@@ -115,6 +115,9 @@ export class FrameWriter {
   /** Each vehicle sent last frame: its seats, whether its look was moving (doors, a kerb stop), its archetype. */
   private readonly sent = new Map<VehicleId, { seats: number; busy: boolean; people: number; archetype: number }>();
   private parkedSerial = -1;
+  /** The vehicles on the roads at the last frame and at this one (swapped): one that left them and stands in no bay is let go. */
+  private roadWas = new Map<VehicleId, Vehicle>();
+  private roadNow = new Map<VehicleId, Vehicle>();
   /** Each person's look as last sent: the fields' own values, compared by identity (`lookMoved`). */
   private readonly pedSent = new Map<number, PedLook>();
   private signalSerial = -1;
@@ -128,6 +131,7 @@ export class FrameWriter {
   /** A new map, or a page that has nothing: everything is sent again. */
   reset(): void {
     this.sent.clear();
+    this.roadWas.clear();
     this.parkedSerial = -1;
     this.pedSent.clear();
     this.signalSerial = -1;
@@ -136,7 +140,8 @@ export class FrameWriter {
 
   write(w: SimWorld): SimFrame {
     const looks: VehicleLook[] = [];
-    const present = new Set<VehicleId>();
+    const roadNow = this.roadNow;
+    roadNow.clear();
     let speedSum = 0, queued = 0;
     // The traffic.
     const road = w.vehiclesInIdOrder();
@@ -144,7 +149,7 @@ export class FrameWriter {
     let n = 0;
     for (const v of road) {
       if (this.put(w, v, this.vehicles, n * VEHICLE_STRIDE, looks)) n++;
-      present.add(v.id);
+      roadNow.set(v.id, v);
       speedSum += v.v;
       if (v.v < 0.5) queued++;
     }
@@ -165,9 +170,19 @@ export class FrameWriter {
       if (!w.ambient.isParked(car)) continue;
       if (this.put(w, car, this.parked, p * VEHICLE_STRIDE, looks)) p++;
     }
-    for (const car of w.ambient.parked) present.add(car.id);
-    // Those gone from the page's view: their records let go.
-    for (const id of this.sent.keys()) if (!present.has(id)) { this.sent.delete(id); this.odometer.forget(id); }
+    // Those gone from the page's view, by what left the roads and the bays (never a walk of every bay): their records let go.
+    const forget = (id: VehicleId): void => { this.sent.delete(id); this.odometer.forget(id); };
+    if (whole) {
+      /** @rebuild Every record once the bays are sent whole (a new map). */
+      const bays = new Set<VehicleId>();
+      for (const car of w.ambient.parked) bays.add(car.id);
+      for (const id of [...this.sent.keys()]) if (!roadNow.has(id) && !bays.has(id)) forget(id);
+    } else {
+      for (const id of parkedGone) if (!roadNow.has(id)) forget(id);
+      for (const [id, v] of this.roadWas) if (!roadNow.has(id) && !w.ambient.isParked(v)) forget(id);
+    }
+    this.roadNow = this.roadWas;
+    this.roadWas = roadNow;
 
     const peds = this.writePeds(w.pedViews);
     const signals = this.writeSignals(w);
