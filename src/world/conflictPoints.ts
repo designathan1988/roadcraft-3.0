@@ -445,7 +445,7 @@ function sweepOf(graph: LaneletGraph, c: Connector,
     frameLengthSq = frameLengthsOf(frame);
     FRAME_LENGTHS.set(frame, frameLengthSq);
   }
-  return { crossing, path, c0, count, length: crossing.length, frame, frameLengthSq, bounds: null, grid: null, range: null };
+  return { crossing, path, c0, count, length: crossing.length, frame, frameLengthSq, bounds: null, boxes: null, range: null };
 }
 
 /** The key of a sweep's frame in `sweepCache`: its three centrelines' digests and its sample count. */

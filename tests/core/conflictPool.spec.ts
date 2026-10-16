@@ -16,7 +16,7 @@ class FakeWorker {
   say(data: unknown): void { this.onmessage?.({ data }); }
 }
 
-const sweep = (): SweepSamples => ({ c0: 0, count: 1, length: 1, frame: new Float64Array(4), frameLengthSq: new Float64Array(1), bounds: null, grid: null, range: null } as unknown as SweepSamples);
+const sweep = (): SweepSamples => ({ c0: 0, count: 1, length: 1, frame: new Float64Array(4), frameLengthSq: new Float64Array(1), bounds: null, boxes: null, range: null } as unknown as SweepSamples);
 
 describe('the conflict pool', () => {
   beforeEach(() => {

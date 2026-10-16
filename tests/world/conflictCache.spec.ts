@@ -72,7 +72,7 @@ function addLeg(doc: RoadDoc): NodeId {
 const offPage: PairMeasurer = {
   measure(pairs) {
     const fresh = (s: SweepSamples): SweepSamples => ({
-      c0: s.c0, count: s.count, length: s.length, frame: s.frame.slice(), frameLengthSq: s.frameLengthSq.slice(), bounds: null, grid: null, range: null,
+      c0: s.c0, count: s.count, length: s.length, frame: s.frame.slice(), frameLengthSq: s.frameLengthSq.slice(), bounds: null, boxes: null, range: null,
     });
     return Promise.resolve(pairs.map((p) => pairTable(fresh(p.a), fresh(p.b))?.slice() ?? null));
   },

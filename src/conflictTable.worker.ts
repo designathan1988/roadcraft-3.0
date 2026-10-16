@@ -138,7 +138,7 @@ self.onmessage = async (event: MessageEvent<PairsAsk | TurnsAsk | SweepsAsk | Fi
       return;
     }
     // The caches `pairTable` keeps on a sweep start empty here, as on the page.
-    const samples: SweepSamples[] = ask.sweeps.map((s) => ({ ...s, bounds: null, grid: null, range: null }));
+    const samples: SweepSamples[] = ask.sweeps.map((s) => ({ ...s, bounds: null, boxes: null, range: null }));
     const tables: (Float64Array | null)[] = [];
     const transfer: ArrayBuffer[] = [];
     for (let k = 0; k < ask.pairs.length; k += 2) {

@@ -55,7 +55,7 @@ function workers(failSweeps = false): Workers {
       asked.pairs += pairs.length;
       const plain = (s: SweepSamples) => ({ c0: s.c0, count: s.count, length: s.length, frame: s.frame, frameLengthSq: s.frameLengthSq });
       const sent = structuredClone(pairs.map((p) => ({ a: plain(p.a), b: plain(p.b) })));
-      const fresh = (s: ReturnType<typeof plain>): SweepSamples => ({ ...s, bounds: null, grid: null, range: null });
+      const fresh = (s: ReturnType<typeof plain>): SweepSamples => ({ ...s, bounds: null, boxes: null, range: null });
       return Promise.resolve(structuredClone(sent.map((p) => pairTable(fresh(p.a), fresh(p.b)))));
     },
     chooseTurns(asks, surfaces) {

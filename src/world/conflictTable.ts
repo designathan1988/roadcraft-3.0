@@ -64,8 +64,10 @@ export function sweepSpan(length: number): { c0: number; count: number } {
 
 /** Clearance kept around every body, world units (6 cm). */
 const SWEEP_MARGIN = m(0.06);
-/** Broad-phase cell size, world units. */
-const CELL = m(3.2);
+/** Consecutive samples one broad-phase box holds (`boxesOf`). */
+const CHUNK = 8;
+/** Slack on the broad phase's box tests, world units: far below a sample's rounding, far above the SAT's. */
+const BOX_SLACK = m(1e-6);
 
 /** What one movement's sweep is sampled from, as plain numbers */
 export interface SweepAsk {
@@ -228,8 +230,8 @@ export interface SweepSamples {
   readonly frameLengthSq: Float64Array;
   /** A conservative bound around every sampled heavy-vehicle body. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
-  /** Broad phase of the HEAVY rectangles: cell key -> sample indices. */
-  grid: Map<number, number[]> | null;
+  /** Broad phase of the HEAVY rectangles (`boxesOf`), computed once. */
+  boxes: SweepBoxes | null;
   /** Body classes that may stand at each sampled centre, computed once. */
   range: Uint8Array | null;
 }
@@ -249,37 +251,47 @@ function boundsOf(s: SweepSamples): { minX: number; minY: number; maxX: number; 
   return (s.bounds = { minX, minY, maxX, maxY });
 }
 
-function gridOf(s: SweepSamples): Map<number, number[]> {
-  if (s.grid) return s.grid;
-  const grid = new Map<number, number[]>();
-  const [hl, hw] = halfExtent(HEAVY);
-  for (let i = 0; i < s.count; i++) {
-    const x = s.frame[i * 4] as number;
-    const y = s.frame[i * 4 + 1] as number;
-    const tx = s.frame[i * 4 + 2] as number;
-    const ty = s.frame[i * 4 + 3] as number;
-    const ex = Math.abs(tx) * hl + Math.abs(ty) * hw;
-    const ey = Math.abs(ty) * hl + Math.abs(tx) * hw;
-    for (let gx = Math.floor((x - ex) / CELL); gx <= Math.floor((x + ex) / CELL); gx++) {
-      for (let gy = Math.floor((y - ey) / CELL); gy <= Math.floor((y + ey) / CELL); gy++) {
-        const key = cellKey(gx, gy);
-        const list = grid.get(key);
-        if (list) list.push(i);
-        else grid.set(key, [i]);
-      }
-    }
-  }
-  s.grid = grid;
-  return grid;
+/** A sweep's HEAVY rectangles bounded: per sample its half extents along x and y, and per `CHUNK` samples their box. */
+export interface SweepBoxes {
+  readonly ext: Float64Array;
+  /** Per chunk: min x, min y, max x, max y. */
+  readonly chunks: Float64Array;
 }
 
-const cellKey = (x: number, y: number): number => (x + 32768) * 65536 + (y + 32768);
+function boxesOf(s: SweepSamples): SweepBoxes {
+  if (s.boxes) return s.boxes;
+  const [hl, hw] = halfExtent(HEAVY);
+  const ext = new Float64Array(s.count * 2);
+  const chunks = new Float64Array(Math.ceil(s.count / CHUNK) * 4);
+  for (let i = 0; i < s.count; i++) {
+    const x = s.frame[i * 4] as number, y = s.frame[i * 4 + 1] as number;
+    const tx = s.frame[i * 4 + 2] as number, ty = s.frame[i * 4 + 3] as number;
+    const ex = Math.abs(tx) * hl + Math.abs(ty) * hw;
+    const ey = Math.abs(ty) * hl + Math.abs(tx) * hw;
+    ext[i * 2] = ex;
+    ext[i * 2 + 1] = ey;
+    const c = Math.floor(i / CHUNK) * 4;
+    if (i % CHUNK === 0) {
+      chunks[c] = x - ex; chunks[c + 1] = y - ey; chunks[c + 2] = x + ex; chunks[c + 3] = y + ey;
+    } else {
+      chunks[c] = Math.min(chunks[c]!, x - ex); chunks[c + 1] = Math.min(chunks[c + 1]!, y - ey);
+      chunks[c + 2] = Math.max(chunks[c + 2]!, x + ex); chunks[c + 3] = Math.max(chunks[c + 3]!, y + ey);
+    }
+  }
+  return (s.boxes = { ext, chunks });
+}
 
 /** Half length and half width of each class's swept rectangle, built once. */
 const HALF_EXTENT: readonly (readonly [number, number])[] = BODY_CLASSES.map((cls) => {
   const e = BODY_ENVELOPE[cls] as { length: number; width: number };
   return [e.length / 2 + SWEEP_STEP / 2 + SWEEP_MARGIN, e.width / 2 + SWEEP_MARGIN] as const;
 });
+
+/** Per class pair (`ca * 3 + cb`), the squared centre distance past which two bodies' circumscribed circles are apart, with `BOX_SLACK`. */
+const APART_SQ: readonly number[] = BODY_CLASSES.flatMap((ca) => BODY_CLASSES.map((cb) => {
+  const r = Math.hypot(...(HALF_EXTENT[ca] as readonly [number, number])) + Math.hypot(...(HALF_EXTENT[cb] as readonly [number, number])) + BOX_SLACK;
+  return r * r;
+}));
 
 function halfExtent(cls: BodyClass): readonly [number, number] {
   return HALF_EXTENT[cls] as readonly [number, number];
@@ -331,82 +343,101 @@ function overlap(
 export function pairTable(a: SweepSamples, b: SweepSamples): Float64Array | null {
   const aa = boundsOf(a), bb = boundsOf(b);
   if (aa.maxX < bb.minX || bb.maxX < aa.minX || aa.maxY < bb.minY || bb.maxY < aa.minY) return null;
-  // Heavy against heavy, through the grid.
-  const hits: number[] = [];
-  // Which of b's samples this sample of a has already tested: a stamp per sample instead of a set cleared per sample.
-  const seen = new Int32Array(b.count);
-  const grid = gridOf(b);
-  const [hl, hw] = halfExtent(HEAVY);
-  for (let i = 0; i < a.count; i++) {
-    const x = a.frame[i * 4] as number, y = a.frame[i * 4 + 1] as number;
-    const tx = a.frame[i * 4 + 2] as number, ty = a.frame[i * 4 + 3] as number;
-    const ex = Math.abs(tx) * hl + Math.abs(ty) * hw;
-    const ey = Math.abs(ty) * hl + Math.abs(tx) * hw;
-    const stamp = i + 1;
-    for (let gx = Math.floor((x - ex) / CELL); gx <= Math.floor((x + ex) / CELL); gx++) {
-      for (let gy = Math.floor((y - ey) / CELL); gy <= Math.floor((y + ey) / CELL); gy++) {
-        const cell = grid.get(cellKey(gx, gy));
-        if (!cell) continue;
-        for (const j of cell) {
-          if (seen[j] === stamp) continue;
-          seen[j] = stamp;
-          if (overlap(a, i, HEAVY, b, j, HEAVY)) hits.push(i, j);
-        }
-      }
-    }
-  }
-  if (!hits.length) return null;
-
+  // DO NOT go back to a grid of cells: a map per sweep and every sample's cells looked up, most of a city's build (2026-10-16).
+  // Heavy against heavy: the boxes of consecutive samples that meet, then the samples in them whose boxes meet.
+  const A = boxesOf(a), B = boxesOf(b);
+  const chunksA = A.chunks, chunksB = B.chunks, extA = A.ext, extB = B.ext;
   const rangeA = rangeOf(a), rangeB = rangeOf(b);
-
-  // 3 x 3 class pairs x [enterA, exitA, enterB, exitB]; NaN = no overlap.
-  const table = new Float64Array(TABLE_SIZE).fill(Number.NaN);
+  // 3 x 3 class pairs x [enterA, exitA, enterB, exitB]; NaN = no overlap. Made at the first heavy hit.
+  let table: Float64Array | null = null;
   // The four SAT axes and their body projections are identical for all nine class pairs at a sampled pose pair.
   const projection = new Float64Array(20);
-  for (let k = 0; k < hits.length; k += 2) {
-    const i = hits[k] as number, j = hits[k + 1] as number;
-    const ax = a.frame[i * 4] as number, ay = a.frame[i * 4 + 1] as number;
-    const aux = a.frame[i * 4 + 2] as number, auy = a.frame[i * 4 + 3] as number;
-    const bx = b.frame[j * 4] as number, by = b.frame[j * 4 + 1] as number;
-    const bux = b.frame[j * 4 + 2] as number, buy = b.frame[j * 4 + 3] as number;
-    const dx = bx - ax, dy = by - ay;
-    for (let axis = 0; axis < 4; axis++) {
-      const nx = axis === 0 ? aux : axis === 1 ? -auy : axis === 2 ? bux : -buy;
-      const ny = axis === 0 ? auy : axis === 1 ? aux : axis === 2 ? buy : bux;
-      const at = axis * 5;
-      projection[at] = Math.abs(dx * nx + dy * ny);
-      projection[at + 1] = Math.abs(aux * nx + auy * ny);
-      projection[at + 2] = Math.abs(-auy * nx + aux * ny);
-      projection[at + 3] = Math.abs(bux * nx + buy * ny);
-      projection[at + 4] = Math.abs(-buy * nx + bux * ny);
-    }
-    const cA = a.c0 + i * SWEEP_STEP;
-    const cB = b.c0 + j * SWEEP_STEP;
-    const eligibleA = rangeA[i] as number, eligibleB = rangeB[j] as number;
-    for (const ca of BODY_CLASSES) {
-      if (!(eligibleA & (1 << ca))) continue;
-      const [ahl, ahw] = halfExtent(ca);
-      for (const cb of BODY_CLASSES) {
-        if (!(eligibleB & (1 << cb))) continue;
-        if (ca !== HEAVY || cb !== HEAVY) {
-          const [bhl, bhw] = halfExtent(cb);
-          let separate = false;
-          for (let axis = 0; axis < 4; axis++) {
-            const at = axis * 5;
-            const ra = ahl * (projection[at + 1] as number) + ahw * (projection[at + 2] as number);
-            const rb = bhl * (projection[at + 3] as number) + bhw * (projection[at + 4] as number);
-            if ((projection[at] as number) >= ra + rb) { separate = true; break; }
-          }
-          if (separate) continue;
+  for (let p = 0; p < chunksA.length; p += 4) {
+    const pMinX = chunksA[p]! - BOX_SLACK, pMinY = chunksA[p + 1]! - BOX_SLACK, pMaxX = chunksA[p + 2]! + BOX_SLACK, pMaxY = chunksA[p + 3]! + BOX_SLACK;
+    for (let q = 0; q < chunksB.length; q += 4) {
+      const qMinX = chunksB[q]!, qMinY = chunksB[q + 1]!, qMaxX = chunksB[q + 2]!, qMaxY = chunksB[q + 3]!;
+      if (pMaxX < qMinX || qMaxX < pMinX || pMaxY < qMinY || qMaxY < pMinY) continue;
+      const i1 = Math.min(a.count, (p / 4 + 1) * CHUNK), j0 = (q / 4) * CHUNK, j1 = Math.min(b.count, j0 + CHUNK);
+      for (let i = (p / 4) * CHUNK; i < i1; i++) {
+        const x = a.frame[i * 4] as number, y = a.frame[i * 4 + 1] as number;
+        const ex = extA[i * 2]! + BOX_SLACK, ey = extA[i * 2 + 1]! + BOX_SLACK;
+        if (x + ex < qMinX || qMaxX < x - ex || y + ey < qMinY || qMaxY < y - ey) continue;
+        for (let j = j0; j < j1; j++) {
+          if (Math.abs((b.frame[j * 4] as number) - x) > ex + extB[j * 2]! || Math.abs((b.frame[j * 4 + 1] as number) - y) > ey + extB[j * 2 + 1]!) continue;
+          if (!overlap(a, i, HEAVY, b, j, HEAVY)) continue;
+          table ??= new Float64Array(TABLE_SIZE).fill(Number.NaN);
+          classesAt(a, i, b, j, rangeA[i]!, rangeB[j]!, table, projection);
         }
-        const at = (ca * 3 + cb) * 4;
-        widen(table, at, cA);
-        widen(table, at + 2, cB);
       }
     }
   }
-
   return table;
+}
+
+/** At a pose pair whose heavy bodies meet, the class pairs that meet too, widened into the table. */
+function classesAt(a: SweepSamples, i: number, b: SweepSamples, j: number, eligibleA: number, eligibleB: number, table: Float64Array, projection: Float64Array): void {
+  const cA = a.c0 + i * SWEEP_STEP;
+  const cB = b.c0 + j * SWEEP_STEP;
+  let projected = false;
+  const dx = (b.frame[j * 4] as number) - (a.frame[i * 4] as number), dy = (b.frame[j * 4 + 1] as number) - (a.frame[i * 4 + 1] as number);
+  const distanceSq = dx * dx + dy * dy;
+  // Class pairs found apart at this pose pair (bit `ca * 3 + cb`): smaller bodies of both are apart too (`HALF_EXTENT` nests).
+  let apart = 0;
+  for (let ca = HEAVY; ca >= 0; ca--) {
+    if (!(eligibleA & (1 << ca))) continue;
+    const [ahl, ahw] = halfExtent(ca as BodyClass);
+    for (let cb = HEAVY; cb >= 0; cb--) {
+      if (!(eligibleB & (1 << cb))) continue;
+      const at = (ca * 3 + cb) * 4;
+      // DO NOT test a pose pair that cannot widen the table: only each class pair's first and last positions are kept.
+      if (cA >= table[at]! && cA <= table[at + 1]! && cB >= table[at + 2]! && cB <= table[at + 3]!) continue;
+      if (ca !== HEAVY || cb !== HEAVY) {
+        if (apart & (1 << (ca * 3 + cb))) continue;
+        // Their circles apart: the SAT below would find them apart too, on a margin far above its rounding.
+        if (distanceSq > APART_SQ[ca * 3 + cb]!) {
+          for (let x = 0; x <= ca; x++) for (let y = 0; y <= cb; y++) apart |= 1 << (x * 3 + y);
+          continue;
+        }
+        if (!projected) {
+          projected = true;
+          projectAxes(a, i, b, j, projection);
+        }
+        const [bhl, bhw] = halfExtent(cb as BodyClass);
+        let separate = false;
+        for (let axis = 0; axis < 4; axis++) {
+          const p = axis * 5;
+          const ra = ahl * (projection[p + 1] as number) + ahw * (projection[p + 2] as number);
+          const rb = bhl * (projection[p + 3] as number) + bhw * (projection[p + 4] as number);
+          if ((projection[p] as number) >= ra + rb) { separate = true; break; }
+        }
+        if (separate) {
+          for (let x = 0; x <= ca; x++) for (let y = 0; y <= cb; y++) apart |= 1 << (x * 3 + y);
+          continue;
+        }
+      }
+      widen(table, at, cA);
+      widen(table, at + 2, cB);
+    }
+  }
+}
+
+/** The four SAT axes of two sampled bodies (their own frames) and, on each, the centres' distance and the four half-axis projections. */
+function projectAxes(a: SweepSamples, i: number, b: SweepSamples, j: number, projection: Float64Array): void {
+  const ax = a.frame[i * 4] as number, ay = a.frame[i * 4 + 1] as number;
+  const aux = a.frame[i * 4 + 2] as number, auy = a.frame[i * 4 + 3] as number;
+  const bx = b.frame[j * 4] as number, by = b.frame[j * 4 + 1] as number;
+  const bux = b.frame[j * 4 + 2] as number, buy = b.frame[j * 4 + 3] as number;
+  const dx = bx - ax, dy = by - ay;
+  for (let axis = 0; axis < 4; axis++) {
+    const nx = axis === 0 ? aux : axis === 1 ? -auy : axis === 2 ? bux : -buy;
+    const ny = axis === 0 ? auy : axis === 1 ? aux : axis === 2 ? buy : bux;
+    const at = axis * 5;
+    projection[at] = Math.abs(dx * nx + dy * ny);
+    projection[at + 1] = Math.abs(aux * nx + auy * ny);
+    projection[at + 2] = Math.abs(-auy * nx + aux * ny);
+    projection[at + 3] = Math.abs(bux * nx + buy * ny);
+    projection[at + 4] = Math.abs(-buy * nx + bux * ny);
+  }
 }
 
 function widen(table: Float64Array, at: number, c: number): void {
