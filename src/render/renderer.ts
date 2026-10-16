@@ -2648,6 +2648,8 @@ export function createSceneRenderer(
         const close = halfHeight < 900;
         // The atlas keeps in full only the plates near what the view takes in (`flatAtlas.ts`).
         terrain.focus?.(centre.x, centre.y, halfHeight);
+        // The plates out of view let go of their GPU copies; three.js sends them again when they are next drawn.
+        terrain.cull?.(crowdFrustum);
         // The roads at full detail within reach of what the view takes in, the far level beyond: a few frames apart
         roadFocus.x = centre.x; roadFocus.y = centre.y;
         roadFocus.reach = Math.min(900, Math.max(320, halfHeight * 1.8));

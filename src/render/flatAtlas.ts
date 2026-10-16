@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, Group, Mesh, MeshStandardMaterial, type WebGLRenderer } from 'three';
+import { BufferAttribute, BufferGeometry, Group, Mesh, MeshStandardMaterial, Sphere, type WebGLRenderer } from 'three';
 import type { CoverKind, GeologyKind, PaintDab } from '@world/terrainPaint';
 import { reliefHeight, type ReliefVersion, type TerrainStamp } from '@world/terrain';
 import type { RoadDoc } from '@world/doc';
@@ -544,6 +544,8 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     return p.surface ? read(p.surface, x - p.cx, y - p.cy) : bareRead(p, x - p.cx, y - p.cy);
   };
 
+  /** A plate's bounds in the world, grown (`cull`). */
+  const gpuBounds = new Sphere();
   const first = plates[home]!;
   ensure(first);
   refresh();
@@ -611,6 +613,22 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     },
     setVegetation(amount) {
       farForest.book.setVegetation(amount);
+    },
+    cull(frustum) {
+      for (const p of plates) {
+        const s = p.surface;
+        // The home plate lends its verge material and ecology texture to the whole map: kept.
+        if (!s || p === first) continue;
+        const bounds = s.ground.geometry.boundingSphere;
+        let inView = true;
+        if (bounds) {
+          // three.js draws a plate whose sphere is in view: grown by the keeping margin, its copies stay a little before and after.
+          gpuBounds.copy(bounds).applyMatrix4(s.ground.matrix);
+          gpuBounds.radius *= KEEP_MARGIN;
+          inView = frustum.intersectsSphere(gpuBounds);
+        }
+        s.keepOnGpu?.(p.shown && inView);
+      }
     },
     vergeMaterial: firstSurface.vergeMaterial,
     heightAt: (x, y) => ask(x, y, (s, lx, ly) => s.heightAt(lx, ly), bareAt),

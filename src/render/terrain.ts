@@ -23,6 +23,7 @@ import {
   Sphere,
   Box3,
   Vector3,
+  type Frustum,
   type Material,
   type Object3D,
   type Texture,
@@ -183,6 +184,10 @@ export interface TerrainSurface {
   setVegetation?(amount: number): void;
   /** The woods' density but the ecosystem's share per cell, made off the page with the plate's first build */
   woodsBase?(): Float32Array | null;
+  /** Keeps the plate's buffers and own textures on the GPU (true) or lets them go (false); its arrays stay, sent whole when it is next drawn */
+  keepOnGpu?(keep: boolean): void;
+  /** Once a frame, with the camera's frustum: the plates out of view let go of their GPU copies (`keepOnGpu`). */
+  cull?(frustum: Frustum): void;
   dispose(): void;
 }
 
@@ -2431,6 +2436,30 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     if (box) packShore(added ? box : null);
   };
 
+  /** Whether the plate's GPU copies are kept (`keepOnGpu`). */
+  let onGpu = true;
+  const keepOnGpu = (keep: boolean): void => {
+    if (keep === onGpu) return;
+    onGpu = keep;
+    if (keep) return;
+    // DO NOT leave ranges or layers waiting: three.js r186 would send only those into a fresh texture, and again after a fresh buffer.
+    for (const attribute of Object.values(geometry.attributes)) (attribute as BufferAttribute).clearUpdateRanges();
+    triangles.clearUpdateRanges();
+    // Disposed on the GPU only (WebGLGeometries, WebGLTextures): the arrays stay, and the materials keep their programs.
+    geometry.dispose();
+    water.geometry.dispose();
+    paintArray.clearLayerUpdates();
+    paintArray.dispose();
+    paintWhole = true;
+    paintDirty = null;
+    lightDirty = null;
+    shore.clearUpdateRanges();
+    shore.dispose();
+    shoreWhole = true;
+    ecologyTexture.dispose();
+    groundTexture.dispose();
+  };
+
   const parts: TerrainPart[] = [];
   const surface: TerrainSurface = {
     meshes: [ground, water],
@@ -2629,6 +2658,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       return true;
     },
     woodsBase: () => woods,
+    keepOnGpu,
     dispose() {
       disposed = true;
       geometry.dispose();
