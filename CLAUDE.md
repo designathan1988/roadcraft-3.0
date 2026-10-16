@@ -76,7 +76,12 @@ cause, technique and source). Git history is the archive.
   (`addUpdateRange`) in agents, transit, grass, blob shadows, casualties, gore, exhaust, nature
   trees, far forest and poles; picking by the ground plane, no `Raycaster`; on-demand frame loop
   (`frameLoop.ts`); sRGB output, ACES, PMREM of the sky, no fog (player's choice); reversed float
-  depth.
+  depth; `GTAOPass`'s normal target is never bound, so never allocated on the GPU (r186
+  `WebGLRenderer.setRenderTarget` allocates lazily); the roads' near/far blocks
+  (`mesh/roadResidency.ts`): a burst of disposals after a camera jump is the residency working.
+- Rejected: the poles' level of detail as meshes per 256 m cell (`wip/poles-lod`, local): on a
+  1.2 km city the same triangles and 283 -> 452 draw calls in the street view. Redo it inside
+  `instanceRuns.ts` (one mesh per kind, a pixel-size cut in the cull).
 - Under review: building far level with hysteresis (shows simplified buildings for 3-4 s after a
   camera move); one 4096 shadow map fitted to the view (stair-step aliasing up close); SMAA and
   GTAO at half resolution (the player wants nothing blurry); baked textures with mipmaps (foliage
@@ -99,12 +104,14 @@ Read by agents on `fix/workers-10km` at `3780807` (quick read; line numbers from
 bytes and ms are estimates from reading). Re-check the line before fixing.
 
 GPU memory and drawing
-- Render targets and shadow map are not counted (`core/perfBudget.ts:196` passes `null`).
 - `color`/`roadSection` attributes on every road strip (`mesh/surfaceMesh.ts:68`, `tileMesh.ts:83`):
   24 of 56 B per vertex unused. Fix: the `SurfaceSpec` declares what it reads.
 - Garden buffers sized to the whole city, never shrink; body and card stores keep the same matrices
   (`gardens.ts:281-287, 512, 516`).
-- Non-indexed geometry: `structures.ts:414`, `vehicleModels.ts:298` (`toNonIndexed`).
+- Vehicle models non-indexed (`vehicleModels.ts` `merge`): index them only with the wreck
+  (`agents.ts`, normals recomputed after denting) keeping its own non-indexed copy.
+- The wear field is dense over the whole map (`wear.ts`: 2048² Float32 x2 + RGBA = 48 MB on the CPU
+  from boot, 5 m texels on the 10 km map). Fix: sparse tiles where there is wear.
 - About 43 draw calls per building cell: a mesh per finish and an `InstancedMesh` per part kind
   (`buildingMesh.ts:3531, 3573`).
 - Needs shots and the player's yes: signature buildings without a far level (`massing.ts:157`);
@@ -146,11 +153,9 @@ O(map) per edit
   `rebindVehicles` walks the whole fleet (`pipeline.ts:167-200`); every signal, even asleep, each
   tick (`pipeline.ts:92`); control advisor every 10 s (`controlAdvisor.ts:37`); all stops scanned
   (`transit/transit.ts:268`); `trainZones` built each tick (`walk.ts:1952`).
-- Fleet copied or scanned: per tick in `lotTraffic.ts:156, 269, 309`, `lorryTraffic.ts:136, 247`;
-  per frame in `render/agents.ts:2120`; per body in `wallsNear` (`playEffects.ts:307`).
-- Ragdoll allocates per frame (`ragdoll.ts:2027-2034, 1421`), one height field per body (`:1526`),
-  `ragdollGround` cleared whole above a cap (`playEffects.ts:240`). Baked crowd blends palettes on
-  the CPU (`riggedCitizens.ts:793, 911, 1143`).
+- Fleet copied or scanned per tick in `lotTraffic.ts:156, 269, 309`, `lorryTraffic.ts:136, 247`.
+- The rigged crowd blends palettes on the CPU (`riggedCitizens.ts` `emit`): only the scenery's few
+  bodies and `?bodies=cooked`; the default crowd (`proceduralCrowd.ts`) is on the GPU.
 - 188 global-revision reads still suppressed in `scripts/baselines/eslint-suppressions.json` (35
   files: `renderer.ts` 42, `doc.ts` 23, `flatAtlas.ts` 19, `main.ts` 15, `terrain.ts` 7). The engine
   has only 6 `engine.register`; the other derived products update themselves.
@@ -165,11 +170,18 @@ Player's decisions
   to 133,500 (`tests/perf/budgets.spec.ts` fails its minimum): either the roads are built another
   way or they lost detail. Needs before/after shots of the same views and the player's call.
 
-Agents disagreed (check the line): `GTAOPass` allocating an unused `normalRenderTarget`
-(`postprocess.ts:262`, r186 `GTAOPass.js:225, 317`); `simShowsMotion` (`main.ts:2870`).
+Memory measured (heap snapshots, SwiftShader, `scratchpad` probes; 2026-10-16):
+- At boot, no city: 63 MB of JS objects and 604 MB of array buffers (328 MB held by JS: wear
+  field 50 MB, instance buffers, terrain grids; 235 MB held by the browser in 608 buffers the
+  snapshot cannot attribute).
+- After a 1.2 km city (4,694 buildings), garbage collected: 352 MB of objects (2.7 M `Object`s and
+  1.2 M element arrays: the document's points, ~32 KB a building), 690 MB of buffers held by JS
+  (gardens' matrices, spheres and colours 43 MB, ~9 KB a building) and 540 MB held by the browser.
+- The heap does not grow with zoom: map and district views weigh the same after a GC (1.2 GB);
+  the 2.6 GB seen in shots was garbage not yet collected.
 
-Not checked (need a measure in the game): ~100 KB heap per building, ~30 MB/s garbage, a road
-taking 9-10 s, opening the big map, 18.6 ms GPU on the whole map, relighting at sun ≥ 2°.
+Not checked (need a measure in the game): ~30 MB/s garbage, a road taking 9-10 s, opening the big
+map, 18.6 ms GPU on the whole map, relighting at sun ≥ 2°.
 
 Already fixed on the branch (do not report as open): transit and fog by the diary; gullies
 (`setGullies` is empty); forests cell by cell (`plantCells.ts`); the `no-global-revision` lint;
