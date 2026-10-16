@@ -8,7 +8,7 @@ import { readEconomy } from '@world/economy';
 import { isSerializedBuildings } from '@world/buildings/serialize';
 import { unitFactor } from '@world/rescale';
 import { METERS_PER_UNIT, m, perM } from '@world/units';
-import { type PartStore, PartedSaves, indexedDbParts } from './chunkedSave';
+import { type PartStore, PartedSaves, type StoredLayout, indexedDbParts } from './chunkedSave';
 
 /** Where the map is kept. */
 const KEY = 'roadcraft.world.v7';
@@ -67,8 +67,8 @@ export class Persistence {
 
   /** The map's parts (`chunkedSave.ts`): what the diary says changed, never one text of the map; null without IndexedDB (the whole text). */
   private readonly parted: PartedSaves | null;
-  /** The parts the opening read the map from (`loadSessionAsync`), for `adoptLoaded`. */
-  private loadedParts: readonly number[] | null = null;
+  /** What the opening read the map from (`loadSessionAsync`), for `adoptLoaded`. */
+  private loadedParts: StoredLayout | null = null;
 
   constructor(private readonly storageKey = KEY, private readonly store: LargeStore = indexedDbStore, parts: PartStore | null = defaultParts()) {
     this.parted = parts ? new PartedSaves(parts, storageKey) : null;
@@ -173,13 +173,13 @@ export class Persistence {
     let best = local, bestAt = localAt;
     this.loadedParts = null;
     const parted = this.parted ? await this.parted.read().catch((error: unknown) => { console.warn('[save] the parts of the map could not be read', error); return null; }) : null;
-    let bestParts: readonly number[] | null = null;
+    let bestParts: StoredLayout | null = null;
     if (parted && parted.savedAt > bestAt) {
       const session = { version: 2, document: parted.document, settings: parted.settings };
       if (isSavedSession(session)) {
         best = { document: session.document, settings: this.readSettings() ?? normalizeSettings(session.settings) };
         bestAt = parted.savedAt;
-        bestParts = parted.parts;
+        bestParts = { parts: parted.parts, head: parted.head };
       }
     }
     this.loadedParts = bestParts;

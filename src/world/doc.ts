@@ -2022,82 +2022,126 @@ export class RoadDoc {
     return `${JSON.stringify(head).slice(0, -1)},"buildings":${this.buildings.toText()}${after === '{}' ? '' : `,${after.slice(1, -1)}`}}`;
   }
 
-  /** `toJSON` without the buildings: the head of a map saved in parts (`editor/chunkedSave.ts`). */
-  withoutBuildings(): SerializedDoc {
-    return this.serialized(false);
+  /** `toJSON`, the buildings left out when `withBuildings` is false (`clone` shares them): each key as `savedPart` and `savedValue` write it. */
+  private serialized(withBuildings: boolean): SerializedDoc {
+    const out: Record<string, unknown> = {};
+    for (const key of SAVED_KEYS) {
+      const value = key === 'buildings' ? (withBuildings && this.buildings.size > 0 ? this.buildings.toJSON() : undefined)
+        : isSavedRecordKey(key) ? this.savedPart(key) : this.savedValue(key);
+      if (value !== undefined) out[key] = value;
+    }
+    return out as unknown as SerializedDoc;
   }
 
-  /** `toJSON`, the buildings left out when `withBuildings` is false (`clone` shares them). */
-  private serialized(withBuildings: boolean): SerializedDoc {
-    return {
-      version: 1,
-      unit: METERS_PER_UNIT,
-      nodes: [...this.nodes.values()].map((n) => ({
-        // Copied, never aliased.
-        id: n.id, x: n.x, y: n.y, heightOffset: n.heightOffset, smooth: n.smooth,
-        control: n.control, blockedMovements: [...n.blockedMovements],
-        ...(n.crossing ? { crossing: { kind: n.crossing.kind, segment: n.crossing.segment } } : {}),
-        ...(n.laneLinks ? { laneLinks: n.laneLinks.map((l) => ({ ...l })) } : {}),
-        ...(n.approachRules ? { approachRules: n.approachRules.map((e) => ({ ...e })) } : {}),
-        ...(n.signal ? { signal: { ...n.signal, ...(n.signal.greens ? { greens: [...n.signal.greens] } : {}) } } : {}),
-        ...(n.end ? { end: n.end } : {}),
-        ...(n.uturn !== undefined ? { uturn: n.uturn as number } : {}),
-      })),
-      segments: [...this.segments.values()].map((s) => ({
-        id: s.id,
-        a: s.a,
-        b: s.b,
-        type: s.type,
-        curve: s.curve ? { ...s.curve } : null,
-        dashOrigin: s.dashOrigin,
-        direction: s.direction,
-        lanes: s.lanes,
-        structure: s.structure,
-        ...(s.section ? { section: cloneRoadSection(s.section) } : {}),
-        ...(s.parking ? { parking: { ...s.parking } } : {}),
-        ...(s.cutWalls ? { cutWalls: true as const } : {}),
-      })),
-      terrain: this.terrainStamps.map((stamp) => ({ ...stamp })),
-      // Only for the natural land: a legacy map serialises as before.
-      ...(this.terrainRelief !== RELIEF_LEGACY ? { relief: this.terrainRelief } : {}),
-      ...(this.markingStyle !== 'classic' ? { markingStyle: this.markingStyle } : {}),
-      ...(this.nature ? { nature: { ...this.nature } } : {}),
-      ...(this.terrainPaint.length > 0 ? { paint: this.terrainPaint.map((dab) => ({ ...dab })) } : {}),
-      ...(this.fogDabs.length > 0 || !samePlain(this.fogSettings, DEFAULT_FOG)
-        ? { fog: { dabs: this.fogDabs.map((dab) => ({ ...dab })), settings: { ...this.fogSettings } } } : {}),
-      ...(this.gullyDabs.length > 0 || this.gullyAuto !== DEFAULT_GULLY_AUTO
-        ? { gullies: { dabs: this.gullyDabs.map((dab) => ({ ...dab })), auto: this.gullyAuto } } : {}),
-      ...(this.clouds.length > 0 ? { clouds: this.clouds.map((c) => ({ ...c })) } : {}),
-      ...(this.elements.length > 0 ? { elements: this.elements.map((e) => ({ ...e })) } : {}),
-      ...(this.trees.length > 0 ? { trees: this.trees.map((t) => ({ ...t })) } : {}),
-      ...(!samePlain(this.weather, DEFAULT_WEATHER) ? { weather: { ...this.weather } } : {}),
-      ...(this.treeClearings.length > 0 ? { treeClearings: this.treeClearings.map((c) => ({ ...c })) } : {}),
-      poles: [...this.poles.values()].map((p) => ({ id: p.id, x: p.x, y: p.y, lamp: p.lamp })),
-      poleSpans: [...this.poleSpans.values()].map((s) => ({ id: s.id, a: s.a, b: s.b })),
-      ...(this.landscape.size > 0 ? {
-        landscape: [...this.landscape.values()].map((item) => ({ id: item.id, kind: item.kind, x: item.x, y: item.y,
+  /** A keyed part's records as the file writes them, in the document's order; undefined: the file leaves the key out. */
+  private savedPart(key: SavedRecordKey): unknown[] | undefined {
+    // Only when there are any, so a map without them serialises as before (the lots: with the land cut into them).
+    if ((key === 'landscape' && this.landscape.size === 0) || (key === 'barriers' && this.barriers.size === 0)) return undefined;
+    if (key === 'lots' && this.lotStore.size === 0 && this.lotStore.keys.length === 0) return undefined;
+    const out: unknown[] = [];
+    for (const id of this.savedIds(key)) out.push(this.savedRecord(key, id));
+    return out;
+  }
+
+  /** The ids of a keyed part, in the document's order (`savedPart`). */
+  savedIds(key: SavedRecordKey): Iterable<number> {
+    switch (key) {
+      case 'nodes': return this.nodes.keys();
+      case 'segments': return this.segments.keys();
+      case 'poles': return this.poles.keys();
+      case 'poleSpans': return this.poleSpans.keys();
+      case 'landscape': return this.landscape.keys();
+      case 'barriers': return this.barriers.keys();
+      case 'lots': return [...this.lotStore.all()].map((lot) => lot.id);
+    }
+  }
+
+  /** One record of a keyed part as the file writes it (copied, never aliased); undefined: none of that id (`editor/chunkedSave.ts`). */
+  savedRecord(key: SavedRecordKey, id: number): unknown {
+    switch (key) {
+      case 'nodes': {
+        const n = this.nodes.get(id as NodeId);
+        return n && {
+          id: n.id, x: n.x, y: n.y, heightOffset: n.heightOffset, smooth: n.smooth,
+          control: n.control, blockedMovements: [...n.blockedMovements],
+          ...(n.crossing ? { crossing: { kind: n.crossing.kind, segment: n.crossing.segment } } : {}),
+          ...(n.laneLinks ? { laneLinks: n.laneLinks.map((l) => ({ ...l })) } : {}),
+          ...(n.approachRules ? { approachRules: n.approachRules.map((e) => ({ ...e })) } : {}),
+          ...(n.signal ? { signal: { ...n.signal, ...(n.signal.greens ? { greens: [...n.signal.greens] } : {}) } } : {}),
+          ...(n.end ? { end: n.end } : {}),
+          ...(n.uturn !== undefined ? { uturn: n.uturn as number } : {}),
+        };
+      }
+      case 'segments': {
+        const s = this.segments.get(id as SegmentId);
+        return s && {
+          id: s.id, a: s.a, b: s.b, type: s.type, curve: s.curve ? { ...s.curve } : null,
+          dashOrigin: s.dashOrigin, direction: s.direction, lanes: s.lanes, structure: s.structure,
+          ...(s.section ? { section: cloneRoadSection(s.section) } : {}),
+          ...(s.parking ? { parking: { ...s.parking } } : {}),
+          ...(s.cutWalls ? { cutWalls: true as const } : {}),
+        };
+      }
+      case 'poles': { const p = this.poles.get(id as PoleId); return p && { id: p.id, x: p.x, y: p.y, lamp: p.lamp }; }
+      case 'poleSpans': { const s = this.poleSpans.get(id as SpanId); return s && { id: s.id, a: s.a, b: s.b }; }
+      case 'landscape': {
+        const item = this.landscape.get(id);
+        return item && { id: item.id, kind: item.kind, x: item.x, y: item.y,
           ...(item.signType ? { signType: item.signType } : {}), ...(item.text ? { text: item.text } : {}),
-          ...(item.planted !== undefined ? { planted: item.planted } : {}) })),
-      } : {}),
-      // Only when there are any, so a map without them serialises as before.
-      ...(this.barriers.size > 0 ? {
-        barriers: [...this.barriers.values()].map((b) => ({ id: b.id, kind: b.kind, points: b.points.map((p) => ({ x: p.x, y: p.y })) })),
-      } : {}),
-      // Only when there are any, so a map without buildings serialises exactly as it did before buildings existed.
-      ...(withBuildings && this.buildings.size > 0 ? { buildings: this.buildings.toJSON() } : {}),
-      ...(this.zones.length > 0 ? { zones: this.zones.map((zone) => ({ ...zone, buildingIds: [...zone.buildingIds] })) } : {}),
-      ...(this.zoneMarks.length > 0 ? { zoneMarks: this.zoneMarks.map((mark) => ({ ...mark })) } : {}),
-      ...(this.lotStore.size > 0 || this.lotStore.keys.length > 0 ? {
-        lots: this.lotStore.toJSON(),
-        lotKeys: [...this.lotStore.keys],
-      } : {}),
+          ...(item.planted !== undefined ? { planted: item.planted } : {}) };
+      }
+      case 'barriers': { const b = this.barriers.get(id); return b && { id: b.id, kind: b.kind, points: b.points.map((p) => ({ x: p.x, y: p.y })) }; }
+      case 'lots': { const lot = this.lotStore.get(id); return lot && { ...lot, corners: lot.corners.map((q) => ({ x: q.x, y: q.y })) }; }
+    }
+  }
+
+  /** Whether a keyed part holds a record of that id (`savedRecord` without writing it). */
+  hasSavedRecord(key: SavedRecordKey, id: number): boolean {
+    switch (key) {
+      case 'nodes': return this.nodes.has(id as NodeId);
+      case 'segments': return this.segments.has(id as SegmentId);
+      case 'poles': return this.poles.has(id as PoleId);
+      case 'poleSpans': return this.poleSpans.has(id as SpanId);
+      case 'landscape': return this.landscape.has(id);
+      case 'barriers': return this.barriers.has(id);
+      case 'lots': return this.lotStore.has(id);
+    }
+  }
+
+  /** A lot's place in the lots' order (`LotStore.orderOf`): a map saved in parts by id reads its lots back in it. */
+  lotOrder(id: number): number | undefined {
+    return this.lotStore.orderOf(id);
+  }
+
+  /** A key of the file other than the records' and the buildings', as the file writes it; undefined: the file leaves it out. */
+  savedValue(key: SavedValueKey): unknown {
+    switch (key) {
+      case 'version': return 1;
+      case 'unit': return METERS_PER_UNIT;
+      case 'terrain': return this.terrainStamps.map((stamp) => ({ ...stamp }));
+      // Only for the natural land: a legacy map serialises as before.
+      case 'relief': return this.terrainRelief !== RELIEF_LEGACY ? this.terrainRelief : undefined;
+      case 'markingStyle': return this.markingStyle !== 'classic' ? this.markingStyle : undefined;
+      case 'nature': return this.nature ? { ...this.nature } : undefined;
+      case 'paint': return this.terrainPaint.length > 0 ? this.terrainPaint.map((dab) => ({ ...dab })) : undefined;
+      case 'fog': return this.fogDabs.length > 0 || !samePlain(this.fogSettings, DEFAULT_FOG)
+        ? { dabs: this.fogDabs.map((dab) => ({ ...dab })), settings: { ...this.fogSettings } } : undefined;
+      case 'gullies': return this.gullyDabs.length > 0 || this.gullyAuto !== DEFAULT_GULLY_AUTO
+        ? { dabs: this.gullyDabs.map((dab) => ({ ...dab })), auto: this.gullyAuto } : undefined;
+      case 'clouds': return this.clouds.length > 0 ? this.clouds.map((c) => ({ ...c })) : undefined;
+      case 'elements': return this.elements.length > 0 ? this.elements.map((e) => ({ ...e })) : undefined;
+      case 'trees': return this.trees.length > 0 ? this.trees.map((t) => ({ ...t })) : undefined;
+      case 'weather': return !samePlain(this.weather, DEFAULT_WEATHER) ? { ...this.weather } : undefined;
+      case 'treeClearings': return this.treeClearings.length > 0 ? this.treeClearings.map((c) => ({ ...c })) : undefined;
+      case 'zones': return this.zones.length > 0 ? this.zones.map((zone) => ({ ...zone, buildingIds: [...zone.buildingIds] })) : undefined;
+      case 'zoneMarks': return this.zoneMarks.length > 0 ? this.zoneMarks.map((mark) => ({ ...mark })) : undefined;
+      case 'lotKeys': return this.lotStore.size > 0 || this.lotStore.keys.length > 0 ? [...this.lotStore.keys] : undefined;
       // Likewise the people: only a city that has some carries the key.
-      ...(this.people.length > 0 ? { people: this.people.map((p) => JSON.parse(JSON.stringify(p)) as PersonSpec) } : {}),
-      // And the public transport.
-      ...(hasTransit(this.transit) ? { transit: JSON.parse(JSON.stringify(this.transit)) as TransitData } : {}),
+      case 'people': return this.people.length > 0 ? this.people.map((p) => JSON.parse(JSON.stringify(p)) as PersonSpec) : undefined;
+      case 'transit': return hasTransit(this.transit) ? JSON.parse(JSON.stringify(this.transit)) as TransitData : undefined;
       // Only off the starting balance: a map that never paid for a road serialises as before.
-      ...(this.economy.balance !== DEFAULT_ECONOMY.balance ? { economy: { balance: this.economy.balance } } : {}),
-    };
+      case 'economy': return this.economy.balance !== DEFAULT_ECONOMY.balance ? { balance: this.economy.balance } : undefined;
+    }
   }
 
   /** Builds a document from its serialized form. */
@@ -2785,6 +2829,20 @@ function keepWhere<T>(list: T[], keep: (item: T) => boolean): void {
 function sameList<T>(a: readonly T[], b: readonly T[]): boolean {
   return a.length === b.length && a.every((value, i) => value === b[i]);
 }
+
+/** The file's keys kept by id: saved in parts by id (`editor/chunkedSave.ts`), each record as `RoadDoc.savedRecord` writes it. */
+export type SavedRecordKey = 'nodes' | 'segments' | 'poles' | 'poleSpans' | 'landscape' | 'barriers' | 'lots';
+/** The file's other keys, but the buildings (`RoadDoc.savedValue`). */
+export type SavedValueKey = Exclude<keyof SerializedDoc, SavedRecordKey | 'buildings'>;
+/** Each key of the file and its place in it: a key added to the format and not here does not compile. */
+const SAVED_PLACE: Record<keyof SerializedDoc, number> = {
+  version: 0, unit: 1, nodes: 2, segments: 3, terrain: 4, relief: 5, markingStyle: 6, nature: 7, paint: 8, fog: 9, gullies: 10,
+  clouds: 11, elements: 12, trees: 13, weather: 14, treeClearings: 15, poles: 16, poleSpans: 17, landscape: 18, barriers: 19,
+  buildings: 20, zones: 21, zoneMarks: 22, lots: 23, lotKeys: 24, people: 25, transit: 26, economy: 27,
+};
+const SAVED_KEYS = (Object.keys(SAVED_PLACE) as (keyof SerializedDoc)[]).sort((a, b) => SAVED_PLACE[a] - SAVED_PLACE[b]);
+export const SAVED_RECORD_KEYS: readonly SavedRecordKey[] = ['nodes', 'segments', 'poles', 'poleSpans', 'landscape', 'barriers', 'lots'];
+const isSavedRecordKey = (key: string): key is SavedRecordKey => (SAVED_RECORD_KEYS as readonly string[]).includes(key);
 
 /** `toJSON`'s keys written after the buildings (`RoadDoc.toText`). */
 const AFTER_BUILDINGS = new Set(['zones', 'zoneMarks', 'lots', 'lotKeys', 'people', 'transit', 'economy']);
