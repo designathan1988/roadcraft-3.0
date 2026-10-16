@@ -34,7 +34,7 @@ const VALUES: ReplicaReads['values'] = [
 ];
 
 /** What the simulation reads: the roads, the buildings and their wear, the lots. */
-export const SIM_READS: ReplicaReads = {
+const SIM_READS: ReplicaReads = {
   records: [
     { part: 'nodes', kinds: ['roads', 'traffic'] },
     { part: 'segments', kinds: ['roads', 'traffic'] },
@@ -77,6 +77,16 @@ export class ReplicaFeed {
     this.values = reads.values.map((v) => ({ read: v, cursor: new JournalCursor([v.kind]) }));
   }
 
+  /** Records the copy may hold otherwise than the document (its own work, not taken): sent again at the next patch. */
+  private readonly again = new Map<RecordPart, Set<number>>();
+
+  /** These records sent at the next patch as the document holds them, whatever the diary says. */
+  resend(part: RecordPart, ids: Iterable<number>): void {
+    const set = this.again.get(part) ?? new Set<number>();
+    for (const id of ids) set.add(id);
+    this.again.set(part, set);
+  }
+
   /** Everything again at the next patch (a copy made anew). */
   restart(): void {
     for (const r of this.records) r.cursor.reset();
@@ -106,8 +116,11 @@ export class ReplicaFeed {
       }
       const ids = new Set<number>();
       for (const entry of entries) for (const id of entry.ids!) ids.add(id);
-      for (const id of ids) if (!known?.(r.part, id, PARTS[r.part]!.get(doc, id))) put(r.part, id);
+      const again = this.again.get(r.part);
+      for (const id of ids) if (!again?.has(id) && !known?.(r.part, id, PARTS[r.part]!.get(doc, id))) put(r.part, id);
+      for (const id of again ?? []) put(r.part, id);
     }
+    this.again.clear();
     for (const { read: v, cursor } of this.values) {
       const entries = cursor.read(doc.changes);
       if (entries === null || entries.length) values.push({ part: v.part, value: doc.valueOf(v.part) });

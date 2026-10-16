@@ -58,6 +58,7 @@
       "src/main.ts!",
       "src/conflictTable.worker.ts!",
       "src/sim.worker.ts!",
+      "src/growth.worker.ts!",
       "src/render/buildings/fracture.worker.ts!",
       "src/render/citizenBake.worker.ts!",
       "src/render/ecology.worker.ts!",
