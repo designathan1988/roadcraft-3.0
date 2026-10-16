@@ -22,6 +22,8 @@ export interface SignalController {
   sub: SubPhase;
   /** Seconds spent in the current sub-phase. */
   elapsed: number;
+  /** Resting in green since a pass of stage 1 (`restController`): its seconds are counted on from it when read; null awake. */
+  rest?: SignalRest | null;
   /** Tick at which each group last received green. */
   lastServed: Map<GroupId, number>;
   /** Tick at which each stage last ended its green. */
@@ -59,6 +61,10 @@ export interface SignalDeps {
   readonly quiet?: (c: SignalController) => boolean;
 }
 
+/** The passes of stage 1 a world has made: what a resting controller's seconds are counted on by (`restController`). */
+export interface RestClock { passes: number }
+interface SignalRest { readonly clock: RestClock; readonly since: number }
+
 /** How long a green is held past its maximum for a bus about to reach the line (green extension), seconds */
 const BUS_EXTENSION = 10;
 
@@ -72,17 +78,46 @@ export function createController(
   offset: number,
 ): SignalController {
   const { plan, degraded } = safePlan(junction, crossings, deps);
-  return {
+  const phase = seekPhase(plan, offset);
+  const c = {
     node: junction.node,
     plan,
-    // stageIndex / sub / elapsed come from the phase seek below.
-    ...seekPhase(plan, offset),
+    stageIndex: phase.stageIndex,
+    sub: phase.sub,
+    /** The seconds as of its last step, or as of the pass it began to rest on (`rest`). */
+    seconds: phase.elapsed,
+    rest: null as SignalRest | null,
+    // DO NOT add DT to a resting controller each tick: every signal of the map was visited each tick to keep its time.
+    get elapsed(): number { return this.rest ? addRepeated(this.seconds, DT, this.rest.clock.passes - this.rest.since) : this.seconds; },
+    set elapsed(value: number) { this.seconds = value; this.rest = null; },
     lastServed: new Map(plan.groups.map((g) => [g, deps.tick()])),
     stageServed: new Map(plan.stages.map((_, i) => [i, deps.tick()])),
     // Neighbouring junctions start out of phase so platoons do not all stop together.
     offsetApplied: offset,
     degraded,
   };
+  return c;
+}
+
+/** `x` after `n` float additions of `step`, bit for bit as `x += step` n times, in a few operations per binade */
+export function addRepeated(x: number, step: number, n: number): number {
+  while (n > 0) {
+    // Below 1, or for a step that is not positive, an addition's rounding may hang on x's own last bit: one at a time.
+    if (!(x >= 1) || !(step > 0)) { x += step; n--; continue; }
+    let top = 2 ** Math.floor(Math.log2(x));
+    if (top > x) top /= 2;
+    else if (top * 2 <= x) top *= 2;
+    top *= 2;
+    // A step falling half way between two floats of the binade rounds to the even one: one at a time.
+    const r = step / (top * 2 ** -53);
+    const inc = (x + step) - x;
+    const k = Math.min(n, Math.floor((top - x) / inc) - 2);
+    if (k <= 1 || r - Math.floor(r) === 0.5) { x += step; n--; continue; }
+    // Within the binade every addition adds the same `inc`, exactly.
+    x += k * inc;
+    n -= k;
+  }
+  return x;
 }
 
 /** Where in its own cycle a plan sits `seconds` after the start of stage 0. */
@@ -138,9 +173,16 @@ function safePlan(
 const isStrict = (): boolean =>
   typeof process !== 'undefined' && process.env?.['SIM_STRICT'] === '1';
 
-/** A tick of a controller asleep (`SimWorld.signalsAsleep`) */
-export function restController(c: SignalController): void {
-  c.elapsed += DT;
+/** A controller asleep from this pass of stage 1 on (`SimWorld.signalsToStep`): its seconds go on by `clock`, without a step a tick. */
+export function restController(c: SignalController, clock: RestClock): void {
+  if (!c.rest) c.rest = { clock, since: clock.passes };
+}
+
+/** A resting controller's seconds brought up to the pass before this one, and it stepped again from now on. */
+export function wakeController(c: SignalController): void {
+  if (!c.rest) return;
+  const seconds = c.elapsed;
+  c.elapsed = seconds;
 }
 
 /** Longest a green is held past its maximum for people still on its crossings, seconds. */

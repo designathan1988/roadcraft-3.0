@@ -121,6 +121,8 @@ export class FrameWriter {
   /** Each person's look as last sent: the fields' own values, compared by identity (`lookMoved`). */
   private readonly pedSent = new Map<number, PedLook>();
   private signalSerial = -1;
+  /** The serial of the signals gone to sleep, as last read (`SimWorld.signalsRestedSince`). */
+  private restSerial = -1;
   private readonly planIds = new WeakMap<SignalPlan, number>();
   private nextPlan = 1;
   private readonly signalSent = new Map<NodeId, { plan: number; stage: number; sub: string }>();
@@ -135,6 +137,7 @@ export class FrameWriter {
     this.parkedSerial = -1;
     this.pedSent.clear();
     this.signalSerial = -1;
+    this.restSerial = -1;
     this.signalSent.clear();
   }
 
@@ -271,19 +274,31 @@ export class FrameWriter {
       const shown = junction?.signalised && w.controller(node);
       junctions.push({ node, groups: shown ? junction.groups.map((g) => ({ id: g.id, segments: [...g.segments] })) : null });
     }
-    if (whole) this.signalSent.clear();
+    // DO NOT compare every signal of the map each frame: only those stepped since (awake, or gone to sleep) and those the log names.
+    const rested = w.signalsRestedSince(this.restSerial);
+    this.restSerial = rested.serial;
     const plans: ShownPlan[] = [];
     const signals: SignalShown[] = [];
-    const live = new Set<NodeId>();
-    for (const c of w.signalisedControllers()) {
-      live.add(c.node);
+    if (whole) this.signalSent.clear();
+    // A junction the log names whose signal went: no longer sent.
+    else for (const node of log.nodes!) if (!w.controller(node) || !w.graph.junctions.get(node)?.signalised) this.signalSent.delete(node);
+    let asked: Iterable<SignalController>;
+    if (whole || rested.controllers === null) asked = w.signalisedControllers();
+    else {
+      const some = new Set<SignalController>(w.signalsAwake());
+      for (const c of rested.controllers) some.add(c);
+      for (const node of log.nodes!) { const c = w.controller(node); if (c) some.add(c); }
+      asked = [...some].sort((a, b) => a.node - b.node);
+    }
+    for (const c of asked) {
+      // Only a signal stage 1 runs: the junction's controller now, signalised.
+      if (w.controller(c.node) !== c || !w.graph.junctions.get(c.node)?.signalised) continue;
       const plan = this.planOf(c, plans);
       const was = this.signalSent.get(c.node);
       if (was && was.plan === plan && was.stage === c.stageIndex && was.sub === c.sub) continue;
       this.signalSent.set(c.node, { plan, stage: c.stageIndex, sub: c.sub });
       signals.push({ node: c.node, plan, stage: c.stageIndex, sub: c.sub });
     }
-    for (const node of this.signalSent.keys()) if (!live.has(node)) this.signalSent.delete(node);
     return { junctions, signalsWhole: whole, plans, signals };
   }
 

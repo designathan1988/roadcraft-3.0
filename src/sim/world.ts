@@ -14,7 +14,7 @@ import type { PairMeasurer } from '@world/conflictTable';
 import { SimClock } from './clock';
 import { ClaimTable } from './intersections/claims';
 import type { Vehicle, VehicleId } from './vehicles/state';
-import { type SignalController, type SignalDeps, createController, rebuildController, seekFixed } from './signals/fsm';
+import { type RestClock, type SignalController, type SignalDeps, createController, rebuildController, restController, seekFixed, wakeController } from './signals/fsm';
 import { type CrossingId, makeCrossingId } from './signals/plan';
 import type { AuditIssue } from './audit';
 import { SidewalkGraph } from './peds/sidewalk';
@@ -27,7 +27,7 @@ import { DT } from './params';
 /** How far before its line a bus asks for priority, world units (V5). */
 const BUS_REACH = m(90);
 
-/** What the signals read of the world (`SignalDeps`), and the reservations by node, which wake a sleeping one (`SimWorld.signalsAsleep`). */
+/** What the signals read of the world (`SignalDeps`), and the reservations by node, which wake a sleeping one (`SimWorld.signalsToStep`). */
 export type WorldSignalDeps = SignalDeps & { readonly reserved: () => ReadonlyMap<NodeId, ReadonlySet<number>> };
 import type { CrossingStates } from './crossings/state';
 import type { PedView } from './people/view';
@@ -149,8 +149,12 @@ export class SimWorld {
   private readonly maybeHolders = new Set<Vehicle>();
   /** Runtime lanes no longer in the graph (an edit took them): stage 7's work list (`collectGhosts`). */
   readonly ghostCandidates = new Set<LaneletId>();
-  /** Signals asleep (`signalsAsleep`): rested in green with nobody near on their last step. */
+  /** Signals asleep (`signalsToStep`): rested in green with nobody near on their last step. */
   private readonly asleep = new Set<SignalController>();
+  /** The signalised controllers not asleep, doing less: stage 1's work list (`signalsToStep`). */
+  private readonly awake = new Set<SignalController>();
+  /** Stage 1's passes: the clock a resting signal's seconds go on by (`restController`). */
+  readonly signalRests: RestClock = { passes: 0 };
   private asleepSince = { roads: -1, junctions: -1 };
 
   /** @mapWide What vehicles, signals and the audit may know about the people at each crossing (`crossings/state.ts`). */
@@ -269,6 +273,7 @@ export class SimWorld {
     this.occupied.clear();
     this.ghostCandidates.clear();
     this.asleep.clear();
+    this.awake.clear();
     this.crossingStates.clear();
     this.pedViews.length = 0;
     this.pedViewById.clear();
@@ -464,28 +469,60 @@ export class SimWorld {
   private readonly approachedSeen = new Set<NodeId>();
 
   /** DO NOT wake them on the document's revision */
-  signalsAsleep(deps: WorldSignalDeps): Set<SignalController> {
-    const asleep = this.asleep;
+  /** Stage 1's controllers, in no set order: the signalised ones awake, those asleep with somebody near woken first */
+  signalsToStep(deps: WorldSignalDeps): Iterable<SignalController> {
+    this.refreshJunctionOrder();
+    const asleep = this.asleep, awake = this.awake;
     const roads = this.doc.changes.serialOf('roads', 'traffic');
     if (!this.doLess || this.asleepSince.roads !== roads || this.asleepSince.junctions !== this.junctionsVersion) {
+      for (const c of asleep) wakeController(c);
       asleep.clear();
+      awake.clear();
+      if (this.doLess) for (const c of this.junctionOrder.signalised.inKeyOrder()) awake.add(c);
       this.asleepSince = { roads, junctions: this.junctionsVersion };
+    } else if (asleep.size > 0) {
+      const { approachOf, crossingOf } = this.junctionOrder;
+      const wake = (c: SignalController | undefined): void => {
+        if (!c || !asleep.delete(c)) return;
+        wakeController(c);
+        awake.add(c);
+      };
+      for (const lane of this.occupied) wake(approachOf.get(lane));
+      for (const x of this.crossingStates.keys()) for (const c of crossingOf.get(x) ?? []) wake(c);
+      for (const node of deps.reserved().keys()) wake(this.controllers.get(node));
     }
-    if (asleep.size === 0) return asleep;
-    this.refreshJunctionOrder();
-    const { approachOf, crossingOf } = this.junctionOrder;
-    for (const lane of this.occupied) {
-      const c = approachOf.get(lane);
-      if (c) asleep.delete(c);
+    this.signalRests.passes++;
+    return this.doLess ? awake : this.junctionOrder.signalised.inKeyOrder();
+  }
+
+  /** A signal that rested in green on its step, nobody near: asleep, its time kept by `signalRests`, until somebody comes. */
+  restSignal(c: SignalController): void {
+    this.awake.delete(c);
+    this.asleep.add(c);
+    restController(c, this.signalRests);
+    this.restLog.push(c);
+    const most = 2 * Math.max(64, this.graph.junctions.size);
+    if (this.restLog.length > most) {
+      const drop = this.restLog.length - most / 2;
+      this.restLog.splice(0, drop);
+      this.restLogBase += drop;
     }
-    for (const x of this.crossingStates.keys()) {
-      for (const c of crossingOf.get(x) ?? []) asleep.delete(c);
-    }
-    for (const node of deps.reserved().keys()) {
-      const c = this.controllers.get(node);
-      if (c) asleep.delete(c);
-    }
-    return asleep;
+  }
+
+  /** The signals that went to sleep, in order (`restSignal`): what the frame reads with the awake ones, not every signal of the map. */
+  private restLog: SignalController[] = [];
+  private restLogBase = 0;
+
+  /** The controllers that went to sleep since `serial`, and the serial now; null when the log no longer reaches back that far. */
+  signalsRestedSince(serial: number): { readonly serial: number; readonly controllers: readonly SignalController[] | null } {
+    const now = this.restLogBase + this.restLog.length;
+    if (serial < this.restLogBase || serial > now) return { serial: now, controllers: null };
+    return { serial: now, controllers: this.restLog.slice(serial - this.restLogBase) };
+  }
+
+  /** The signals stage 1 steps: the awake ones doing less, every signalised one doing everything. */
+  signalsAwake(): Iterable<SignalController> {
+    return this.doLess ? this.awake : this.signalisedControllers();
   }
 
   // -------------------------------------------------------------- topology

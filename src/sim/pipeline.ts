@@ -1,6 +1,6 @@
 import { DT, JAM_GAP, STUCK_SECONDS } from './params';
 import type { SimWorld } from './world';
-import { restController, stepController } from './signals/fsm';
+import { stepController } from './signals/fsm';
 import { longitudinalConstraints } from './vehicles/obstacles';
 import {
   compactReservationChain,
@@ -56,11 +56,9 @@ export function step(w: SimWorld, opts: StepOptions = {}): void {
 
   // 1. signals: the sole mutator of phase state.
   const deps = w.signalDeps();
-  const asleep = w.signalsAsleep(deps);
-  for (const c of w.signalisedControllers()) {
-    if (asleep.has(c)) { restController(c); continue; }
+  for (const c of w.signalsToStep(deps)) {
     tickWork.controllers++;
-    if (stepController(c, deps) && w.doLess) asleep.add(c);
+    if (stepController(c, deps) && w.doLess) w.restSignal(c);
   }
   lap('1 signals');
 
