@@ -197,7 +197,8 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
     ragdollDoc?.buildings.near(x - LOT_GROW, y - LOT_GROW, x + LOT_GROW, y + LOT_GROW) ?? [];
   /** The ground at a corner of the bodies' ground grid (0.2 units a cell): a lot's yard as drawn, else the paving (a footway stands over the terrain), else the terrain. */
   const ragdollCorner = (ix: number, iy: number): number => {
-    const key = ix * 100003 + iy;
+    // Unique for ±2^20 cells each way (±200 km): a larger map than the fixed one never makes two corners one.
+    const key = ix * 2097152 + iy;
     const known = ragdollGround.get(key);
     if (known !== undefined) return known;
     const cx = ix / 5, cy = iy / 5;
@@ -209,7 +210,6 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
     }
     if (!Number.isFinite(h)) h = ctx.pavedHeightAt(cx, cy);
     if (!Number.isFinite(h)) h = ctx.renderedHeightAt(cx, cy);
-    if (ragdollGround.size > 60000) ragdollGround.clear();
     ragdollGround.set(key, h);
     return h;
   };
@@ -341,6 +341,8 @@ export function createPlayEffects(ctx: PlayEffectsContext): PlayEffects {
       ragdolls.update(fxDt, ragdollWorld);
       gore.update(fxDt, ragdollWorld.groundAt);
       ragdolls.draw(citizens, ragdollWorld);
+      // The heights found serve the bodies while they move: once all lie still, they are let go (never a cap that throws away what is in use).
+      if (ragdollGround.size && ragdolls.stats().moving === 0) ragdollGround.clear();
     },
     hides: (id) => ragdolls.hides(id),
     update(wallDt, fxDt) {

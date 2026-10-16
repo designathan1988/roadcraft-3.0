@@ -1897,7 +1897,10 @@ export function createProceduralCrowd(options: { hair?: boolean; /** World units
         return out;
       },
       hold(person, palette) {
-        if (palette) holds.set(person, palette.slice());
+        // Its own copy, written over frame after frame (the ragdoll writes its palette in place).
+        const kept = palette && holds.get(person);
+        if (palette && kept && kept.length === palette.length) kept.set(palette);
+        else if (palette) holds.set(person, palette.slice());
         else { holds.delete(person); if (charred.has(person)) charSlots(person, false); }
       },
       twin(person) {

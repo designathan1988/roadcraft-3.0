@@ -275,9 +275,30 @@ interface Body {
   synced?: { p: Vector3[]; o: Vector3[] } | undefined;
   splats: number;
   spray: number;
+  /** Its bones' world matrices and skin palettes, written in place frame after frame (`bonesWorld`, `palettes`, `risePalette`). */
+  posed?: Posed | undefined;
+}
+
+/** A body's arrays kept for its drawing: made once, written every frame. */
+interface Posed {
+  readonly world: Matrix4[];
+  readonly target: Matrix4[];
+  readonly blended: Matrix4[];
+  readonly solved: Uint8Array;
+  readonly on: Uint8Array;
+  readonly pieces: Float32Array[];
+  readonly shown: Float32Array[];
+  readonly rise: Float32Array;
+  readonly risen: Float32Array[];
 }
 
 const tmpA = new Vector3(), tmpB = new Vector3(), tmpC = new Vector3(), tmpD = new Vector3(), tmpE = new Vector3();
+/** Scratch for the drawing of a body (`bonesWorld`, `palettes`, `risePalette`): one frame's sums, nothing kept. */
+const poseSide = new Vector3(), poseAxis = new Vector3(), posePos = new Vector3(), poseQuat = new Quaternion();
+const poseF = new Matrix4(), poseF0t = new Matrix4(), poseBack = new Matrix4(), poseInv = new Matrix4(), poseM = new Matrix4(), poseA = new Matrix4(), poseB = new Matrix4();
+const poseP0 = new Vector3(), poseQ0 = new Quaternion(), poseS0 = new Vector3(), poseP1 = new Vector3(), poseQ1 = new Quaternion(), poseS1 = new Vector3();
+const PART_TURN = Object.fromEntries(PART_NAMES.map((part) => [part, new Quaternion()])) as Record<PartName, Quaternion>;
+const PART_ORIGIN = Object.fromEntries(PART_NAMES.map((part) => [part, new Vector3()])) as Record<PartName, Vector3>;
 /** The axes a body's frame falls back on when its particles give none (three's space: y up). */
 const WORLD_UP: Readonly<Vector3> = new Vector3(0, 1, 0);
 const WORLD_SIDE: Readonly<Vector3> = new Vector3(1, 0, 0);
@@ -765,6 +786,7 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
       lostParts: new Set(PART_NAMES.filter((part) => !parts.includes(part))),
       survivor: undefined, pin: { root, keep }, drop: index !== body.index ? () => citizens.untwin?.(index) : undefined,
       comp: [], palettes: [], anchor: new Matrix4(), still: 0, asleep: false, age: 0, flying: 0, pooled: false, splats: 0, spray: 0, torn: true,
+      posed: undefined,
     };
     components(piece);
     if (body.jolt) {
@@ -1026,10 +1048,10 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
         } else if (alive?.phase === 'rise' && alive.keys && !alive.from) {
           // Into the crouch: the clip takes over from the pose reached.
           keyPose(body, alive, world);
-          alive.from = bonesWorld(body);
-          body.palettes = [risePalette(body, alive, citizens)];
+          alive.from = bonesWorld(body).map((w) => w.clone());
+          body.palettes = risen(body, risePalette(body, alive, citizens));
         } else if (alive?.phase === 'rise' && alive.from && alive.root) {
-          body.palettes = [risePalette(body, alive, citizens)];
+          body.palettes = risen(body, risePalette(body, alive, citizens));
         } else if (!body.asleep || !body.palettes.length || body.age > LIE) {
           body.palettes = palettes(body, bonesWorld(body));
         }
@@ -1064,7 +1086,7 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
     alive.t = 0;
     const crouch = clip ? particlesOf(body, clip.palette, alive.root) : null;
     if (!crouch) {
-      alive.from = bonesWorld(body);
+      alive.from = bonesWorld(body).map((w) => w.clone());
       alive.pre = 0; alive.blend = RISE_BLEND;
       getUp(alive.id, x, y, heading, RISE_BLEND + alive.clip);
       return;
@@ -1123,7 +1145,7 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
     alive.clip = first.duration * upTo / 1.15;
     alive.phase = 'rise';
     alive.t = 0;
-    alive.from = bonesWorld(body);
+    alive.from = bonesWorld(body).map((w) => w.clone());
     alive.pre = 0;
     alive.blend = crawl ? CRAWL_UP : 0.35;
     body.asleep = true;
@@ -1232,46 +1254,47 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
     const clip = citizens.clipPose(body.index, alive.riseKey ?? RISE_KEY, phase);
     const bones = body.pos0.length;
     const from = alive.from!;
-    let world: Matrix4[];
+    const posed = posedOf(body);
+    let world: readonly Matrix4[];
     if (!clip) world = from;
     else {
-      const w = new Matrix4();
-      const target = from.map((_, i) => {
-        w.fromArray(clip.palette, i * 16).multiply(body.binds[i]!);
-        return new Matrix4().multiplyMatrices(alive.root!, body.rebind).multiply(w);
-      });
+      const target = posed.target;
+      for (let i = 0; i < bones; i++) {
+        poseA.fromArray(clip.palette, i * 16).multiply(body.binds[i]!);
+        target[i]!.multiplyMatrices(alive.root!, body.rebind).multiply(poseA);
+      }
       // Blended in, the clip's own matrix exactly: a bone of these rigs is scaled unevenly
       if (blend >= 0.999) world = target;
       else {
-        // Before that, blended as animation systems blend poses
-        world = new Array<Matrix4>(bones);
-        const p0 = new Vector3(), q0 = new Quaternion(), s0 = new Vector3();
-        const p1 = new Vector3(), q1 = new Quaternion(), s1 = new Vector3();
+        // Before that, blended as animation systems blend poses, each bone after its parent
+        const blended = posed.blended, solved = posed.solved;
+        solved.fill(0);
         const local = (list: readonly Matrix4[], i: number, out: Matrix4): Matrix4 => {
           const parent = body.parents[i]!;
           return parent >= 0 ? out.copy(list[parent]!).invert().multiply(list[i]!) : out.copy(list[i]!);
         };
-        const a = new Matrix4(), b = new Matrix4();
         const solve = (i: number): Matrix4 => {
-          const known = world[i];
-          if (known) return known;
-          local(from, i, a).decompose(p0, q0, s0);
-          local(target, i, b).decompose(p1, q1, s1);
-          p0.lerp(p1, blend); q0.slerp(q1, blend); s0.lerp(s1, blend);
-          const own = new Matrix4().compose(p0, q0, s0);
+          const out = blended[i]!;
+          if (solved[i]) return out;
+          // The parent first: its sums share this one's scratch.
           const parent = body.parents[i]!;
-          const out = parent >= 0 ? new Matrix4().multiplyMatrices(solve(parent), own) : own;
-          world[i] = out;
+          const above = parent >= 0 ? solve(parent) : null;
+          local(from, i, poseA).decompose(poseP0, poseQ0, poseS0);
+          local(target, i, poseB).decompose(poseP1, poseQ1, poseS1);
+          poseP0.lerp(poseP1, blend); poseQ0.slerp(poseQ1, blend); poseS0.lerp(poseS1, blend);
+          out.compose(poseP0, poseQ0, poseS0);
+          if (above) out.premultiply(above);
+          solved[i] = 1;
           return out;
         };
         for (let i = 0; i < bones; i++) solve(i);
+        world = blended;
       }
     }
-    const w = new Matrix4();
     body.anchor.copy(alive.root!);
-    const back = body.unbind.clone().multiply(body.anchor.clone().invert());
-    const out = new Float32Array(bones * 16);
-    for (let i = 0; i < bones; i++) w.multiplyMatrices(back, world[i]!).multiply(body.inverses[i]!).toArray(out, i * 16);
+    const back = poseBack.copy(body.unbind).multiply(poseInv.copy(body.anchor).invert());
+    const out = posed.rise;
+    for (let i = 0; i < bones; i++) poseM.multiplyMatrices(back, world[i]!).multiply(body.inverses[i]!).toArray(out, i * 16);
     return out;
   }
 
@@ -1753,8 +1776,26 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
 
   function partFrame(body: Body, part: PartName, side: Vector3, out: Matrix4): Matrix4 {
     const def = PARTS[part];
-    const x = new Vector3().subVectors(body.p[def.to]!, body.p[def.origin]!);
+    const x = poseAxis.subVectors(body.p[def.to]!, body.p[def.origin]!);
     return frameOf(x, def.ref === 'side' ? side : body.normals[def.ref], out);
+  }
+
+  /** The one palette of a body getting up, in its own list. */
+  function risen(body: Body, palette: Float32Array): Float32Array[] {
+    const list = posedOf(body).risen;
+    list.length = 0;
+    list.push(palette);
+    return list;
+  }
+
+  /** The body's drawing arrays, made the first time it is drawn. */
+  function posedOf(body: Body): Posed {
+    const bones = body.pos0.length;
+    const matrices = (): Matrix4[] => Array.from({ length: bones }, () => new Matrix4());
+    return body.posed ??= {
+      world: matrices(), target: matrices(), blended: matrices(), solved: new Uint8Array(bones), on: new Uint8Array(bones),
+      pieces: [], shown: [], rise: new Float32Array(bones * 16), risen: [],
+    };
   }
 
   /** Which piece each particle is on, from the sticks still whole. */
@@ -1765,63 +1806,70 @@ export function createRagdolls(exhaust: Exhaust, getUp: GetUp, gore: Gore | null
     body.comp = body.p.map((_, k) => find(k));
   }
 
-  /** Every bone's world matrix, turned and placed from the particles. */
+  /** Every bone's world matrix, turned and placed from the particles, into the body's own array (`Posed.world`). */
   function bonesWorld(body: Body): Matrix4[] {
-    const side = torsoSide(body, new Vector3()).clone();
+    const side = torsoSide(body, poseSide);
     updateNormals(body, side, 0.5);
-    const turn: Partial<Record<PartName, Quaternion>> = {};
-    const f = new Matrix4(), f0t = new Matrix4();
     for (const part of PART_NAMES) {
-      partFrame(body, part, side, f);
-      f0t.copy(body.frame0[part]).transpose();
-      turn[part] = new Quaternion().setFromRotationMatrix(f.multiply(f0t));
+      partFrame(body, part, side, poseF);
+      poseF0t.copy(body.frame0[part]).transpose();
+      PART_TURN[part].setFromRotationMatrix(poseF.multiply(poseF0t));
     }
     // Each part placed from its parent part, at its rest distance turned with the parent
-    const origin: Partial<Record<PartName, Vector3>> = {};
     for (const part of PART_NAMES) {
       const parent = PART_PARENT[part];
       const own = body.p[PARTS[part].origin]!;
-      if (!parent || body.comp[PARTS[part].origin] !== body.comp[PARTS[parent].origin]) { origin[part] = own; continue; }
-      origin[part] = tmpE.subVectors(body.origin0[part], body.origin0[parent]).applyQuaternion(turn[parent]!).add(origin[parent]!).clone();
+      if (!parent || body.comp[PARTS[part].origin] !== body.comp[PARTS[parent].origin]) { PART_ORIGIN[part].copy(own); continue; }
+      PART_ORIGIN[part].subVectors(body.origin0[part], body.origin0[parent]).applyQuaternion(PART_TURN[parent]).add(PART_ORIGIN[parent]);
     }
-    const world: Matrix4[] = [];
-    const pos = new Vector3(), q = new Quaternion();
+    const world = posedOf(body).world;
     for (let i = 0; i < body.pos0.length; i++) {
       const part = body.bonePart[i]!;
-      const r = turn[part]!;
-      pos.subVectors(body.pos0[i]!, body.origin0[part]).applyQuaternion(r).add(origin[part]!);
-      q.multiplyQuaternions(r, body.rot0[i]!);
-      world.push(new Matrix4().compose(pos, q, body.scl0[i]!));
+      const r = PART_TURN[part];
+      posePos.subVectors(body.pos0[i]!, body.origin0[part]).applyQuaternion(r).add(PART_ORIGIN[part]);
+      poseQuat.multiplyQuaternions(r, body.rot0[i]!);
+      world[i]!.compose(posePos, poseQuat, body.scl0[i]!);
     }
     return world;
   }
 
-  /** The skin matrices of the body (one palette per piece) from its bones' world matrices. */
+  /** The skin matrices of the body (one palette per piece) from its bones' world matrices, written into the body's own arrays. */
   function palettes(body: Body, world: readonly Matrix4[]): Float32Array[] {
     const anchor = body.anchor.makeScale(body.scale, body.scale, body.scale).setPosition(body.p[PEL]!);
     // bind * local^-1 * anchor^-1: from the world back into a bone's matrix.
-    const back = body.unbind.clone().multiply(anchor.clone().invert());
+    const back = poseBack.copy(body.unbind).multiply(poseInv.copy(anchor).invert());
     const bones = body.pos0.length;
-    const m4 = new Matrix4();
-    const out: Float32Array[] = [];
-    for (const piece of new Set(body.comp)) {
-      const on = body.bonePart.map((part) => body.comp[PARTS[part].origin] === piece && !body.lostParts.has(part));
-      if (!on.some(Boolean)) continue;
-      const palette = new Float32Array(bones * 16);
+    const posed = posedOf(body);
+    const on = posed.on;
+    const out = posed.shown;
+    out.length = 0;
+    // Each piece once, in the order its first particle comes (as a Set of `comp` gave them).
+    for (let k = 0; k < body.comp.length; k++) {
+      const piece = body.comp[k]!;
+      if (body.comp.indexOf(piece) !== k) continue;
+      let any = false;
+      for (let i = 0; i < bones; i++) {
+        const part = body.bonePart[i]!;
+        on[i] = body.comp[PARTS[part].origin] === piece && !body.lostParts.has(part) ? 1 : 0;
+        any ||= on[i] === 1;
+      }
+      if (!any) continue;
+      const palette = posed.pieces[out.length] ??= new Float32Array(bones * 16);
       // The piece's own root: its topmost bone (the shoulder of an arm, the hip of a leg).
-      let root = on.findIndex((own, i) => own && !(body.parents[i]! >= 0 && on[body.parents[i]!]));
+      let root = -1;
+      for (let i = 0; i < bones && root < 0; i++) if (on[i] && !(body.parents[i]! >= 0 && on[body.parents[i]!])) root = i;
       if (root < 0) root = 0;
       for (let i = 0; i < bones; i++) {
         if (on[i]) {
-          m4.multiplyMatrices(back, world[i]!).multiply(body.inverses[i]!);
+          poseM.multiplyMatrices(back, world[i]!).multiply(body.inverses[i]!);
         } else {
           // Not on this piece: shrunk to the joint it was torn from
           let j = body.parents[i]!;
           while (j >= 0 && !on[j]) j = body.parents[j]!;
           const t = tmpB.setFromMatrixPosition(world[j >= 0 ? j : root]!).applyMatrix4(back);
-          m4.set(0, 0, 0, t.x, 0, 0, 0, t.y, 0, 0, 0, t.z, 0, 0, 0, 1);
+          poseM.set(0, 0, 0, t.x, 0, 0, 0, t.y, 0, 0, 0, t.z, 0, 0, 0, 1);
         }
-        m4.toArray(palette, i * 16);
+        poseM.toArray(palette, i * 16);
       }
       out.push(palette);
     }
