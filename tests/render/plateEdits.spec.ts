@@ -11,7 +11,9 @@ vi.mock('@render/mesh/textureBaker', async (load) => {
 
 import { RoadDoc } from '@world/doc';
 import { createFlatAtlas } from '@render/flatAtlas';
-import type { TerrainSurface } from '@render/terrain';
+import { TERRAIN_BASE, TERRAIN_CELL, TERRAIN_HALF, createTerrainSurface, type TerrainSource, type TerrainSurface } from '@render/terrain';
+import { buildPlateMesh } from '@render/plateMesh';
+import { RELIEF_NATURAL, reliefHeight, type TerrainStamp } from '@world/terrain';
 import type { PaintDab } from '@world/terrainPaint';
 
 /** A PLATE EDITED DAB BY DAB IS THE PLATE BUILT AT ONCE (`render/terrain.ts`): only the boxes the dabs reach are written and sent. */
@@ -118,4 +120,38 @@ describe('a plate edited by the brush', () => {
       expect(firstDiff(userData(s)[key] as Float32Array, userData(f)[key] as Float32Array)).toBe(-1);
     }
   });
+
+  it('keeps the plate made off the page when stamps are on it, and lays them on it', () => {
+    const side = Math.round((2 * TERRAIN_HALF) / TERRAIN_CELL) + 1;
+    const ground = new Float64Array(side * side);
+    for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) ground[j * side + i] = reliefHeight(RELIEF_NATURAL, -TERRAIN_HALF + i * TERRAIN_CELL, TERRAIN_HALF - j * TERRAIN_CELL);
+    const stamps = STAMPS.map((s, id) => ({ ...s, id }) as TerrainStamp);
+    const source = (): TerrainSource => {
+      const doc = new RoadDoc();
+      return { changes: doc.changes, terrainRevision: 1, terrainStamps: stamps, terrainRelief: RELIEF_NATURAL, natureRevision: 0, nature: null, paintRevision: 0, terrainPaint: [] };
+    };
+    const mesh = buildPlateMesh(ground, side, TERRAIN_HALF, TERRAIN_CELL, TERRAIN_BASE);
+    const madeHeights = mesh.heights.slice();
+    const made = createTerrainSurface(1, { x: 0, y: 0 }, 12, mesh);
+    made.update(source(), false);
+    const page = createTerrainSurface(1, { x: 0, y: 0 }, 12);
+    page.update(source(), false);
+    const a = attribute(made, 'position'), b = attribute(page, 'position');
+    // The same land: the corners the stamps reach worked out alike, the rest the field read off the page at the same corners.
+    for (let i = 1; i < a.length; i += 3) expect(a[i]).toBeCloseTo(b[i]!, 3);
+    // Away from the stamps, the corners are those the workers made, as they made them.
+    let away = 0;
+    for (let k = 0; k < side * side; k++) {
+      const x = -TERRAIN_HALF + (k % side) * TERRAIN_CELL, y = TERRAIN_HALF - Math.floor(k / side) * TERRAIN_CELL;
+      if (stamps.some((s) => Math.max(Math.abs(x - s.x), Math.abs(y - s.y)) < s.radius + 3 * TERRAIN_CELL)) continue;
+      away++;
+      if (a[k * 3 + 1] !== Math.fround(madeHeights[k]!)) expect.fail(`corner ${k} was worked out again on the page`);
+    }
+    expect(away).toBeGreaterThan(side * side * 0.9);
+    expect(made.renderedHeightAt(120, 40)).toBe(page.renderedHeightAt(120, 40));
+    expect(made.renderedHeightAt(120, 40)).toBeGreaterThan(TERRAIN_BASE + reliefHeight(RELIEF_NATURAL, 120, 40) + 1);
+    // Its woods were worked out on the land without the stamps: not used.
+    expect(made.woodsBase?.()).toBeNull();
+  });
 });
+

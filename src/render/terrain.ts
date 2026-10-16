@@ -2539,8 +2539,32 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       if (revision === doc.terrainRevision) return false;
       const firstBuild = revision < 0;
       revision = doc.terrainRevision;
+      // The first build worked out off the page (`plateMesh.ts`, as Cesium builds its terrain meshes in a worker): the land before any stamp.
+      const made = firstBuild ? prebuilt : null;
+      prebuilt = null;
+      // The woods' base holds only on the land it was worked out on: no stamp on it.
+      woods = made && doc.terrainStamps.length === 0 ? made.woods ?? null : null;
+      if (made) {
+        // DO NOT throw it away for the plate's stamps: they are laid on it below, box by box, as the brush lays them.
+        index = new TerrainIndex([], revision, doc.terrainRelief, doc.terrainGround);
+        landIndex = new TerrainIndex([], revision, index.relief, index.ground);
+        const pos = position.array as Float32Array;
+        const h = made.heights;
+        for (let i = 0; i < GRID * GRID; i++) pos[i * 3 + 1] = h[i]!;
+        grid.set(h);
+        natural.set(h);
+        naturalFlip.set(made.flip);
+        markAll(position as BufferAttribute);
+        retriangulate(0, GRID - 1, 0, GRID - 1);
+        (normal.array as Float32Array).set(made.normals);
+        markAll(normal as BufferAttribute);
+        steep.set(made.steep);
+        markAll(steepAttribute);
+        geometry.boundingSphere = new Sphere(new Vector3(0, (made.low + made.high) / 2, 0), Math.hypot(TERRAIN_HALF * Math.SQRT2, (made.high - made.low) / 2));
+      }
       // The stamps the brush added at the end, or an undo took from it, over the same land (relief and ground): the land moved by them alone.
-      const tail = firstBuild ? null : stampTail(index, doc.terrainStamps, doc.terrainRelief ?? RELIEF_LEGACY, doc.terrainGround);
+      const tail = firstBuild && !made ? null : stampTail(index, doc.terrainStamps, doc.terrainRelief ?? RELIEF_LEGACY, doc.terrainGround);
+      if (!made && tail && tail.removed.length === 0 && tail.added.length === 0) return false;
       // Their boxes (corners) and how many corners: past a whole plate's worth, the whole plate is rewritten once.
       const boxes = tail ? [...tail.removed, ...tail.added].map(stampCorners) : null;
       const changed = boxes && boxes.reduce((sum, b) => sum + (b[1] - b[0] + 1) * (b[3] - b[2] + 1), 0) <= GRID * GRID ? boxes : null;
@@ -2557,32 +2581,6 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       } else {
         index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
         landIndex = new TerrainIndex(doc.terrainStamps.filter((stamp) => stamp.mode !== 'river'), revision, index.relief, index.ground);
-      }
-
-      // The first build worked out off the page (`plateMesh.ts`, as Cesium builds its terrain meshes in a worker)
-      const made = firstBuild && prebuilt && doc.terrainStamps.length === 0 ? prebuilt : null;
-      prebuilt = null;
-      // The woods' base holds only on the land it was worked out on.
-      woods = made?.woods ?? null;
-      if (made) {
-        const pos = position.array as Float32Array;
-        const h = made.heights;
-        for (let i = 0; i < GRID * GRID; i++) pos[i * 3 + 1] = h[i]!;
-        grid.set(h);
-        natural.set(h);
-        naturalFlip.set(made.flip);
-        lastRegion = null;
-        markAll(position as BufferAttribute);
-        retriangulate(0, GRID - 1, 0, GRID - 1);
-        (normal.array as Float32Array).set(made.normals);
-        markAll(normal as BufferAttribute);
-        steep.set(made.steep);
-        markAll(steepAttribute);
-        geometry.boundingSphere = new Sphere(new Vector3(0, (made.low + made.high) / 2, 0), Math.hypot(TERRAIN_HALF * Math.SQRT2, (made.high - made.low) / 2));
-        lastStamps = index.stamps;
-        if (stroking) { waterStale = true; markWaterDirty(null); } else { waterStale = false; waterDirty = null; rebuildWater(lastStamps); }
-        markLand('all');
-        return true;
       }
 
       // Only the cells the stamps added or taken reach are rewritten, each stamp's box with every stamp over it.
@@ -2608,6 +2606,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         const sphere = geometry.boundingSphere!;
         for (const i of moved) sphere.expandByPoint(spherePoint.fromBufferAttribute(position, i));
       }
+      // A plate made now is new everywhere.
+      if (firstBuild) box = null;
       lastRegion = box;
       lastStamps = index.stamps;
       // The water - every pool and river on the map - is the deferred part of a stroke
@@ -3024,6 +3024,5 @@ export function stampTail(index: TerrainIndex, now: readonly TerrainStamp[], rel
   // The part both hold: the shorter list, the same at its first and last stamp (the lists only ever grow and shrink at their end).
   const kept = Math.min(had.length, now.length);
   if (kept > 0 && (now[0] !== had[0] || now[kept - 1] !== had[kept - 1])) return null;
-  if (had.length === now.length) return null;
   return { removed: had.slice(kept), added: now.slice(kept) };
 }

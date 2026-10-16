@@ -286,8 +286,9 @@ describe('a crater in a map with no stamps', () => {
     expect(stampTail(index, [old, crater, stamp(2), stamp(3)], RELIEF_LEGACY, undefined)).toEqual({ removed: [], added: [stamp(2), stamp(3)] });
     // The last one undone.
     expect(stampTail(index, [old], RELIEF_LEGACY, undefined)).toEqual({ removed: [crater], added: [] });
-    // Changed otherwise (the oldest dropped at the cap, the same list again).
+    // Changed otherwise (the oldest dropped at the cap): the whole plate.
     expect(stampTail(index, [crater, stamp(2)], RELIEF_LEGACY, undefined)).toBeNull();
-    expect(stampTail(index, [old, crater], RELIEF_LEGACY, undefined)).toBeNull();
+    // The same list: nothing.
+    expect(stampTail(index, [old, crater], RELIEF_LEGACY, undefined)).toEqual({ removed: [], added: [] });
   });
 });
