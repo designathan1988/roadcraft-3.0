@@ -130,12 +130,12 @@ export function applyOp(state: FuzzState, op: FuzzOp): boolean {
       if (id === undefined) return false;
       const line = net.polylines.get(doc, id);
       const s = line.length * op.at;
-      changed = guardRoadEdit(doc, net, () => splitSegment(doc, net, id, s, line.sampleAt(s).p) !== null).changed;
+      changed = guardRoadEdit(doc, net, (work, workNet) => splitSegment(work, workNet, id, s, line.sampleAt(s).p) !== null).changed;
       break;
     }
     case 'join': {
       const id = pickFrom(nodeIds(doc).filter((n) => doc.degree(n) === 2), op.pick);
-      changed = id !== undefined && guardRoadEdit(doc, net, () => joinSegments(doc, id)).changed;
+      changed = id !== undefined && guardRoadEdit(doc, net, (work) => joinSegments(work, id)).changed;
       break;
     }
     case 'move': {
@@ -152,36 +152,36 @@ export function applyOp(state: FuzzState, op: FuzzOp): boolean {
       if (!seg || id === undefined) return false;
       const type = op.op === 'upgrade' ? seg.type + 1 : op.type;
       if (type >= ROAD_TYPES.length || type === seg.type) return false;
-      changed = guardRoadEdit(doc, net, () => { doc.setSegmentType(id, type); return true; }).changed;
+      changed = guardRoadEdit(doc, net, (work) => { work.setSegmentType(id, type); return true; }).changed;
       break;
     }
     case 'lanes': {
       const id = pickFrom(segmentIds(doc), op.pick);
       if (id === undefined) return false;
       const before = doc.segment(id)?.lanes;
-      changed = guardRoadEdit(doc, net, () => {
-        doc.setSegmentLanes(id, op.lanes);
-        return doc.segment(id)?.lanes !== before;
+      changed = guardRoadEdit(doc, net, (work) => {
+        work.setSegmentLanes(id, op.lanes);
+        return work.segment(id)?.lanes !== before;
       }).changed;
       break;
     }
     case 'direction': {
       const id = pickFrom(segmentIds(doc), op.pick);
       if (id === undefined || doc.segment(id)?.direction === op.direction) return false;
-      changed = guardRoadEdit(doc, net, () => { doc.setSegmentDirection(id, op.direction); return true; }).changed;
+      changed = guardRoadEdit(doc, net, (work) => { work.setSegmentDirection(id, op.direction); return true; }).changed;
       break;
     }
     case 'structure': {
       const id = pickFrom(segmentIds(doc), op.pick);
       if (id === undefined || doc.segment(id)?.structure === op.structure) return false;
-      changed = guardRoadEdit(doc, net, () => { doc.setSegmentStructure(id, op.structure); return true; }).changed;
+      changed = guardRoadEdit(doc, net, (work) => { work.setSegmentStructure(id, op.structure); return true; }).changed;
       break;
     }
     case 'curve': {
       const id = pickFrom(segmentIds(doc), op.pick);
       if (id === undefined) return false;
-      changed = guardRoadEdit(doc, net, () => {
-        doc.setSegmentCurve(id, Math.abs(op.h) < 1e-6 ? null : { t: op.t, h: op.h });
+      changed = guardRoadEdit(doc, net, (work) => {
+        work.setSegmentCurve(id, Math.abs(op.h) < 1e-6 ? null : { t: op.t, h: op.h });
         return true;
       }).changed;
       break;
@@ -211,7 +211,7 @@ export function applyOp(state: FuzzState, op: FuzzOp): boolean {
       const base = profileOf(seg);
       const elements = base.elements.map((e, i) => e.kind !== 'footway' ? e
         : { ...e, width: m(i === 0 ? op.left : op.right), ...((i === 0 ? op.flushLeft : op.flushRight) ? { flush: true } : {}) });
-      changed = guardRoadEdit(doc, net, () => applyProfileTo(doc, [id], { ...base, elements }).changed).changed;
+      changed = guardRoadEdit(doc, net, (work) => applyProfileTo(work, [id], { ...base, elements }).changed).changed;
       break;
     }
     case 'control': {

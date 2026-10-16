@@ -122,29 +122,6 @@ export class NetworkBuild {
     this.junctionMax = -Infinity;
   }
 
-  /** Takes another build's state as its own (`Network.adopt`) */
-  copyFrom(other: NetworkBuild): void {
-    this.seen = this.net.doc.changes.version;
-    this.segmentSource = new Map(other.segmentSource);
-    this.segmentEnds = new Map(other.segmentEnds);
-    this.nodeSource = new Map(other.nodeSource);
-    this.nodeRecord = new Map(other.nodeRecord);
-    this.nodeIncident = new Map(other.nodeIncident);
-    this.nodePlaces.copyFrom(other.nodePlaces);
-    this.active = new Set(other.active);
-    this.j1 = new Map(other.j1);
-    this.j2 = new Map(other.j2);
-    this.j3 = new Map(other.j3);
-    this.scale1 = new Map(other.scale1);
-    this.scale2 = new Map(other.scale2);
-    this.trims2 = new Map(other.trims2);
-    this.plateRaw = new Map(other.plateRaw);
-    this.plateKeys = new Map(other.plateKeys);
-    this.ribbonMemo = new Map(other.ribbonMemo);
-    this.ribbonMax = other.ribbonMax;
-    this.junctionMax = other.junctionMax;
-  }
-
   /** DO NOT copy the build's records for an edit: a working copy over `other`'s (`Network.fork`), never written while it stands. */
   layOver(other: NetworkBuild): void {
     // Where the copy's diary starts (`ChangeJournal.forkFrom`): an older serial would read as everything changed.

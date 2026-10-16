@@ -173,38 +173,6 @@ export class Network {
     this.flushCells.clear();
   }
 
-  /** Takes over another network's derived geometry instead of recomputing it. */
-  adopt(other: Network): void {
-    this.copyState(other);
-    this.build.copyFrom(other.build);
-    this.stampBuilt();
-  }
-
-  private copyState(other: Network): void {
-    this.junctions.clear();
-    for (const [node, byLevel] of other.junctions) this.junctions.set(node, byLevel);
-    this.ribbons.clear();
-    for (const [seg, ribbon] of other.ribbons) this.ribbons.set(seg, ribbon);
-    this.segmentCells.copyFrom(other.segmentCells);
-    this.junctionCells.copyFrom(other.junctionCells);
-    this.flushCells.copyFrom(other.flushCells);
-    this.trims.clear();
-    for (const [seg, t] of other.trims) this.trims.set(seg, t);
-    this.plateReach.clear();
-    for (const [key, reach] of other.plateReach) this.plateReach.set(key, reach);
-    this.transitions.clear();
-    for (const node of other.transitions) this.transitions.add(node);
-    this.impossible.clear();
-    for (const [node, gap] of other.impossible) this.impossible.set(node, gap);
-    this.squeezed.clear();
-    for (const [node, short] of other.squeezed) this.squeezed.set(node, short);
-    this.polylines.adopt(other.polylines);
-    const before = this.log.state;
-    this.log.takeFrom(other.log);
-    // The crossing caches belong to the geometry just replaced
-    this.forgetCrossings(this.log.since(before));
-  }
-
   /** DO NOT copy the network for an edit (CLAUDE.md, "Rebuilding everything when one part changes") */
   fork(doc: RoadDoc): Network {
     if (doc.forkOrigin !== this.doc) throw new Error('Network.fork: the document is not a working copy of this network\'s, as it stands');

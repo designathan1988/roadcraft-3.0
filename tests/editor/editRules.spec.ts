@@ -125,7 +125,7 @@ describe('editing rules: what is refused, and why', () => {
     draw(doc, net, [-200, 40], [200, 40], 1);
     const id = [...doc.segments.keys()][0]!;
     const before = doc.toJSON();
-    const result = guardRoadEdit(doc, net, () => { doc.setSegmentLanes(id, 8); return true; });
+    const result = guardRoadEdit(doc, net, (work) => { work.setSegmentLanes(id, 8); return true; });
     expect(result).toEqual({ changed: false, refused: 'overlap' });
     expect(doc.toJSON()).toEqual(before);
     expect(net.revision).toBe(doc.revision);

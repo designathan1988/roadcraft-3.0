@@ -56,7 +56,7 @@
   },
   "src/editor/editRules.ts": {
     "roadcraft/no-global-revision": {
-      "count": 4
+      "count": 2
     }
   },
   "src/editor/lotPlan.ts": {
@@ -907,9 +907,6 @@
   "src/world/network.ts": {
     "roadcraft/no-global-revision": {
       "count": 4
-    },
-    "roadcraft/no-whole-map-walk": {
-      "count": 1
     }
   },
   "src/world/networkBuild.ts": {

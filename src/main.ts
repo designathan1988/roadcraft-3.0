@@ -738,7 +738,7 @@ function mutate(fn: () => boolean): void {
 }
 
 /** A road edit made in place a split, a class, lanes, parking, a section, a direction, a bend, a join, a copy, a node's */
-function mutateRoads(fn: () => boolean): boolean {
+function mutateRoads(fn: (work: RoadDoc, workNet: Network) => boolean): boolean {
   let refused = null as RoadEditRefusal | null;
   const changed = mutateBuilt(() => {
     const result = guardRoadEdit(doc, net, fn);
@@ -1192,8 +1192,8 @@ function pointerDown(e: PointerEvent, r: DOMRect): void {
         anchor.s !== undefined
       ) {
         let node: NodeId | null = null;
-        if (!mutateRoads(() => {
-          node = splitSegment(doc, net, anchor.segment as SegmentId, anchor.s as number, anchor.at);
+        if (!mutateRoads((work, workNet) => {
+          node = splitSegment(work, workNet, anchor.segment as SegmentId, anchor.s as number, anchor.at);
           return node !== null;
         })) node = null;
         if (node !== null) {
@@ -1224,8 +1224,8 @@ function pointerDown(e: PointerEvent, r: DOMRect): void {
         const id = anchor.segment;
         const seg = doc.segment(id);
         if (seg && seg.type < LAST_UPGRADE_CLASS) {
-          mutateRoads(() => {
-            doc.setSegmentType(id, seg.type + 1);
+          mutateRoads((work) => {
+            work.setSegmentType(id, seg.type + 1);
             return true;
           });
         }
@@ -3219,8 +3219,8 @@ function setNodeHeightMetres(id: NodeId, metres: number): void {
     if (Math.abs(height - requested) > 1e-6) flashHint('hint.road.gradeLimited');
     return;
   }
-  mutateRoads(() => {
-    doc.setNodeHeightOffset(id, height);
+  mutateRoads((work) => {
+    work.setNodeHeightOffset(id, height);
     return true;
   });
   if (Math.abs(height - requested) > 1e-6) flashHint('hint.road.gradeLimited');
@@ -3236,30 +3236,30 @@ function showInspector(): void {
       onUpgrade: (id) => {
         const seg = doc.segment(id);
         if (!seg || seg.type >= LAST_UPGRADE_CLASS) return;
-        mutateRoads(() => {
-          doc.setSegmentType(id, seg.type + 1);
+        mutateRoads((work) => {
+          work.setSegmentType(id, seg.type + 1);
           return true;
         });
       },
       onSetType: (id, type) => {
         const seg = doc.segment(id);
         if (!seg || seg.type === type) return;
-        mutateRoads(() => {
-          doc.setSegmentType(id, type);
+        mutateRoads((work) => {
+          work.setSegmentType(id, type);
           return true;
         });
       },
       onSetLanes: (id, lanes) => {
         if (!doc.segment(id)) return;
-        mutateRoads(() => {
-          doc.setSegmentLanes(id, lanes);
+        mutateRoads((work) => {
+          work.setSegmentLanes(id, lanes);
           return true;
         });
       },
       onSetParking: (id, parking) => {
         if (!doc.segment(id)) return;
-        mutateRoads(() => {
-          doc.setSegmentParking(id, parking);
+        mutateRoads((work) => {
+          work.setSegmentParking(id, parking);
           return true;
         });
       },
@@ -3267,8 +3267,8 @@ function showInspector(): void {
       onApplyProfile: (id, profile, type) => {
         if (!doc.segment(id)) return;
         let problem: string | undefined;
-        mutateRoads(() => {
-          const result = applyProfileTo(doc, [id], profile, type);
+        mutateRoads((work) => {
+          const result = applyProfileTo(work, [id], profile, type);
           problem = result.problems[0];
           return result.changed;
         });
@@ -3281,11 +3281,11 @@ function showInspector(): void {
         if (!seg) return;
         const profile = profileOf(seg);
         let problem: string | undefined;
-        mutateRoads(() => {
+        mutateRoads((work) => {
           let changed = false;
-          for (const piece of streetChain(doc, id)) {
+          for (const piece of streetChain(work, id)) {
             if (piece.id === id) continue;
-            const result = applyProfileTo(doc, [piece.id], piece.flipped ? flipProfile(profile) : profile, seg.type);
+            const result = applyProfileTo(work, [piece.id], piece.flipped ? flipProfile(profile) : profile, seg.type);
             problem ??= result.problems[0];
             changed = result.changed || changed;
           }
@@ -3301,29 +3301,29 @@ function showInspector(): void {
       },
       onSetSection: (id, section) => {
         if (!freeRoadsEnabled() || !doc.segment(id)) return;
-        mutateRoads(() => {
-          doc.setSegmentSection(id, section);
+        mutateRoads((work) => {
+          work.setSegmentSection(id, section);
           return true;
         });
       },
       onSetDirection: (id, direction) => {
         if (!doc.segment(id)) return;
-        mutateRoads(() => {
-          doc.setSegmentDirection(id, direction);
+        mutateRoads((work) => {
+          work.setSegmentDirection(id, direction);
           return true;
         });
       },
       onSetNodeHeight: setNodeHeightMetres,
-      onSetNodeEnd: (node, end) => mutateRoads(() => {
-        doc.setNodeEnd(node, end);
+      onSetNodeEnd: (node, end) => mutateRoads((work) => {
+        work.setNodeEnd(node, end);
         return true;
       }),
       onReverseDirection: (id) => {
         const seg = doc.segment(id);
         if (!seg) return;
         const direction = seg.direction === 'aToB' ? 'bToA' : 'aToB';
-        mutateRoads(() => {
-          doc.setSegmentDirection(id, direction);
+        mutateRoads((work) => {
+          work.setSegmentDirection(id, direction);
           return true;
         });
       },
@@ -3332,7 +3332,7 @@ function showInspector(): void {
         if (!seg) return;
         const polyline = net.polylines.get(doc, id);
         const at = polyline.sampleAt(polyline.length / 2).p;
-        mutateRoads(() => splitSegment(doc, net, id, polyline.length / 2, at) !== null);
+        mutateRoads((work, workNet) => splitSegment(work, workNet, id, polyline.length / 2, at) !== null);
       },
       onAddCrossing: (id, kind) => {
         if (!doc.segment(id)) return;
@@ -3357,8 +3357,8 @@ function showInspector(): void {
         if (!doc.segment(id)) return;
         const chosen = game.selectedSegment === id && game.selectedSegmentS !== null ? game.selectedSegmentS : undefined;
         let placed: NodeId | null = null;
-        mutateRoads(() => {
-          const result = commitUturn(doc, net, id, toward, chosen);
+        mutateRoads((work, workNet) => {
+          const result = commitUturn(work, workNet, id, toward, chosen);
           if (!result.committed) {
             flashHint(`hint.uturn.${result.reason}`);
             return false;
@@ -3384,10 +3384,10 @@ function showInspector(): void {
         const s = chosen < 5 || chosen > polyline.length - 5
           ? polyline.length / 2 : chosen;
         let node: NodeId | null = null;
-        if (!mutateRoads(() => {
-          node = splitSegment(doc, net, id, s, polyline.sampleAt(s).p);
+        if (!mutateRoads((work, workNet) => {
+          node = splitSegment(work, workNet, id, s, polyline.sampleAt(s).p);
           if (node === null) return false;
-          doc.requireNode(node).smooth = true;
+          work.requireNode(node).smooth = true;
           return true;
         })) node = null;
         if (node !== null) {
@@ -3440,13 +3440,13 @@ function showInspector(): void {
           seg.curve === curve ||
           (seg.curve !== null && curve !== null && seg.curve.t === curve.t && seg.curve.h === curve.h);
         if (unchanged) return;
-        mutateRoads(() => {
-          doc.setSegmentCurve(id, curve);
+        mutateRoads((work) => {
+          work.setSegmentCurve(id, curve);
           return true;
         });
       },
       onJoin: (node) => {
-        mutateRoads(() => joinSegments(doc, node));
+        mutateRoads((work) => joinSegments(work, node));
         select(game.selectedSegment, game.selectedSegmentS, null, 'roads joined');
         closeInspector();
       },
@@ -3479,8 +3479,8 @@ function showInspector(): void {
 function duplicateSelectedSegment(id = game.selectedSegment): void {
   if (id === null) return;
   let copy: SegmentId | null = null;
-  if (!mutateRoads(() => {
-    copy = duplicateSegment(doc, net, id);
+  if (!mutateRoads((work, workNet) => {
+    copy = duplicateSegment(work, workNet, id);
     return copy !== null;
   })) copy = null;
   if (copy !== null) {

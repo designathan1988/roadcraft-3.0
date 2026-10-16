@@ -91,12 +91,6 @@ export class PolylineCache {
     this.droppedAll = this.below !== null;
   }
 
-  /** Takes over another cache's entries. */
-  adopt(other: PolylineCache): void {
-    this.map.clear();
-    for (const [id, pl] of other.map) this.map.set(id, pl);
-  }
-
   /** DO NOT copy the cache for an edit: a working copy over this one (`Network.fork`) */
   fork(): PolylineCache {
     const copy = new PolylineCache();
