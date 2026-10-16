@@ -22,9 +22,11 @@ function buildGardens(groups: readonly (readonly GardenPlant[])[], kit: SceneryK
   return gardens;
 }
 
-/** Each mesh's drawn instances, by name: matrix and tint of each, in their order. */
-function drawn(gardens: Gardens): Map<string, string[]> {
-  gardens.cull(everything, new Matrix4().makeTranslation(++views, 0, 0));
+/** Each mesh's drawn instances, by name: matrix and tint of each, in their order; the meshes the cull swaps applied to `scene`, as the renderer does. */
+function drawn(gardens: Gardens, scene?: Set<InstancedMesh>): Map<string, string[]> {
+  const swap = gardens.cull(everything, new Matrix4().makeTranslation(++views, 0, 0));
+  for (const mesh of swap.removed) { if (scene) expect(scene.delete(mesh)).toBe(true); }
+  for (const mesh of swap.added) scene?.add(mesh);
   const out = new Map<string, string[]>();
   for (const mesh of gardens.meshes as InstancedMesh[]) {
     const rows: string[] = [];
@@ -63,15 +65,15 @@ describe('garden packs', () => {
     };
     // Grown a few at a time, as a city grows.
     for (let n = 4; n <= 40; n += 4) apply(lists.slice(0, n));
-    expect(sorted(drawn(gardens))).toEqual(sorted(drawn(buildGardens(lists, kit))));
+    expect(sorted(drawn(gardens, shown))).toEqual(sorted(drawn(buildGardens(lists, kit))));
     // Some gone, some changed (a new list for the same building), the rest kept.
     const changed = lists.map((list, g) => (g % 3 === 0 ? garden(g + 100) : list)).filter((_, g) => g % 5 !== 1);
     apply(changed);
-    expect(sorted(drawn(gardens))).toEqual(sorted(drawn(buildGardens(changed, kit))));
+    expect(sorted(drawn(gardens, shown))).toEqual(sorted(drawn(buildGardens(changed, kit))));
     // Most gone: packed again in the order the gardens were placed - the plants of a town built afresh.
     const few = changed.slice(0, 6);
     apply(few);
-    expect(sorted(drawn(gardens))).toEqual(sorted(drawn(buildGardens(few, kit))));
+    expect(sorted(drawn(gardens, shown))).toEqual(sorted(drawn(buildGardens(few, kit))));
     // The meshes in the scene are the ones it has.
     expect(new Set(gardens.meshes)).toEqual(shown);
     gardens.dispose();

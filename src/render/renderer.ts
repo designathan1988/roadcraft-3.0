@@ -2650,7 +2650,10 @@ export function createSceneRenderer(
       barriers.cull(crowdFrustum, crowdProjection);
       transit.cull(crowdFrustum, crowdProjection);
       for (const plants of [coverCells, natureCards, natureForest, paintedForest, plantedForest]) plants?.cull(crowdFrustum, crowdProjection);
-      gardens?.cull(crowdFrustum, crowdProjection);
+      // The gardens' meshes given more or less room for what is in view, swapped in the scene.
+      const regrown = gardens?.cull(crowdFrustum, crowdProjection);
+      for (const mesh of regrown?.removed ?? []) world.remove(mesh);
+      for (const mesh of regrown?.added ?? []) world.add(mesh);
       transit.update(sim.trains, terrain.renderedHeightAt);
       agents.sync(sim, net, alpha, detailed, rig.viewport.zoom, {
         pedestrianDetail: quality.pedestrianDetail,

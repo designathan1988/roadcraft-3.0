@@ -129,7 +129,7 @@ interface Store {
   spheres: Float32Array;
   bounds: Bounds | null;
   runs: Map<Run, { start: number; count: number }>;
-  /** Per drawn position: the slot the GPU buffer holds there since the last cull (-1: unknown). */
+  /** Per drawn position: the slot the GPU buffer holds there since the last cull (-1: unknown); as long as the mesh holds positions. */
   shown: Int32Array;
   /** Culled for the current view. */
   current: boolean;
@@ -265,7 +265,25 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
     for (let i = 0; i < s.used; i++) if (s.spheres[i * 4 + 3] !== -Infinity) file(s, i);
   };
 
-  const newMesh = (s: Store): InstancedMesh => runMesh(s.spec, s.capacity);
+  /** The store's mesh made anew with room for `room` positions drawn, the first `keep` of the old one's carried over */
+  const resize = (s: Store, room: number, keep: number): void => {
+    const was = s.mesh!;
+    const mesh = runMesh(s.spec, room);
+    (mesh.instanceMatrix.array as Float32Array).set((was.instanceMatrix.array as Float32Array).subarray(0, keep * 16));
+    if (s.spec.tinted) (mesh.instanceColor!.array as Float32Array).set((was.instanceColor!.array as Float32Array).subarray(0, keep * 3));
+    const shown = new Int32Array(room).fill(-1);
+    shown.set(s.shown.subarray(0, keep));
+    s.shown = shown;
+    mesh.visible = was.visible;
+    mesh.boundingSphere = was.boundingSphere;
+    mesh.count = Math.min(was.count, keep);
+    group.remove(was);
+    was.dispose();
+    group.add(mesh);
+    s.mesh = mesh;
+    // A new buffer: everything kept goes up with it.
+    s.firstChanged = 0;
+  };
   /** The store's arrays sized for `capacity`; packed (`pack`), its live runs from slot 0 in the order they stood. */
   const repack = (s: Store, capacity: number, pack: boolean): void => {
     const matrices = new Float32Array(capacity * 16), colours = new Float32Array(s.spec.tinted ? capacity * 3 : 0).fill(1);
@@ -339,10 +357,10 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
       if (!s.active) continue;
       const slots = node.slots![s.index]!;
       if (slots.length === 0) continue;
-      const mesh = s.mesh!;
-      const sp = s.spheres, shown = s.shown, matrices = s.matrices, colours = s.colours;
-      const target = mesh.instanceMatrix.array as Float32Array;
-      const tints = s.spec.tinted ? mesh.instanceColor!.array as Float32Array : null;
+      const sp = s.spheres, matrices = s.matrices, colours = s.colours;
+      let shown = s.shown;
+      let target = s.mesh!.instanceMatrix.array as Float32Array;
+      let tints = s.spec.tinted ? s.mesh!.instanceColor!.array as Float32Array : null;
       let n = s.drawn;
       for (const i of slots) {
         const r = sp[i * 4 + 3]!;
@@ -352,6 +370,13 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
           probe.center.set(sp[i * 4]!, sp[i * 4 + 1]!, sp[i * 4 + 2]!);
           probe.radius = r + margin;
           if (!cullFrustum!.intersectsSphere(probe)) continue;
+        }
+        // More in view than the mesh has room for: twice the room.
+        if (n === shown.length) {
+          resize(s, n * 2, n);
+          shown = s.shown;
+          target = s.mesh!.instanceMatrix.array as Float32Array;
+          tints = s.spec.tinted ? s.mesh!.instanceColor!.array as Float32Array : null;
         }
         // Written only when this position held another slot.
         if (shown[n] !== i) {
@@ -393,19 +418,17 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
         const was = s.mesh;
         let moved = false;
         if (s.dead > 0 && s.dead * 2 >= s.used + coming) {
-          // Half the store dead: packed again in the order the runs stood, the new ones after.
-          repack(s, Math.max(s.capacity, MIN_CAPACITY), true);
+          // Half the store dead: packed again in the order the runs stood, the new ones after, in arrays sized for what lives.
+          repack(s, Math.max(MIN_CAPACITY, (s.used - s.dead + coming) * 2), true);
           moved = true;
         }
-        if (s.used + coming > s.capacity) {
-          repack(s, Math.max(MIN_CAPACITY, (s.used + coming) * 2), false);
-          s.mesh = null;
-        }
+        if (s.used + coming > s.capacity) repack(s, Math.max(MIN_CAPACITY, (s.used + coming) * 2), false);
         for (const run of change.added) {
           const one = run.get(s.index);
           if (one) append(s, run, one);
         }
-        if (!s.mesh && s.capacity > 0) s.mesh = newMesh(s);
+        // The mesh holds what is drawn, not the store: it starts small and the cull gives it room (`resize`).
+        if (!s.mesh && s.capacity > 0) { s.mesh = runMesh(s.spec, MIN_CAPACITY); s.shown = new Int32Array(MIN_CAPACITY).fill(-1); }
         if (s.mesh && s.bounds) s.mesh.boundingSphere = new Sphere(new Vector3(s.bounds.x, s.bounds.y, s.bounds.z), s.bounds.r);
         if (was !== s.mesh) {
           if (was) { group.remove(was); was.dispose(); }
@@ -417,10 +440,7 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
           }
         }
         // DO NOT forget every store's positions at every edit: one thing more sent every instance in view to the GPU again.
-        if (moved || was !== s.mesh) {
-          if (s.shown.length < s.capacity) s.shown = new Int32Array(s.capacity);
-          s.shown.fill(-1);
-        }
+        if (moved) s.shown.fill(-1);
         // Its slots came or went: culled again at the next frame.
         s.current = false;
       }
@@ -456,6 +476,8 @@ export function createInstanceRuns(name: string, specs: readonly RunStore[], mar
         if (!s.active) continue;
         s.active = false;
         s.current = true;
+        // Under a quarter of its room in use: half the room, the positions drawn carried over (never at every small change: twice, then a quarter).
+        if (s.drawn * 4 < s.shown.length && s.shown.length > MIN_CAPACITY) resize(s, Math.max(MIN_CAPACITY, s.drawn * 2), s.drawn);
         const mesh = s.mesh!;
         // Only the positions whose slot changed go to the GPU.
         if (s.firstChanged < s.drawn) {

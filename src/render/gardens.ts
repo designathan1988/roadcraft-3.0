@@ -213,8 +213,14 @@ export interface GardenChange {
 
 export interface Gardens extends Scenery {
   /** DO NOT hand it the town's lists to find what changed: that was a pass over the town per building grown. */
-  update(change: GardenChange): { readonly removed: readonly InstancedMesh[]; readonly added: readonly InstancedMesh[] };
+  update(change: GardenChange): MeshSwap;
+  /** The cull, as `Scenery.cull`; a mesh given more or less room for what is drawn is swapped, the caller putting it in the scene. */
+  cull(frustum: Frustum, view: Matrix4): MeshSwap;
 }
+
+/** Meshes taken out of the scene and put in. */
+interface MeshSwap { readonly removed: readonly InstancedMesh[]; readonly added: readonly InstancedMesh[] }
+const NO_SWAP: MeshSwap = { removed: [], added: [] };
 
 export function createGardens(kit: SceneryKit): Gardens {
   const packs = new WeakMap<readonly GardenPlant[], ReadonlyMap<string, GardenPack>>();
@@ -312,8 +318,8 @@ export function createGardens(kit: SceneryKit): Gardens {
     for (let i = 0; i < s.used; i++) if (s.spheres[i * 4 + 3] !== -Infinity) file(s, i);
   };
 
-  const newMesh = (s: Store): InstancedMesh => {
-    const mesh = new InstancedMesh(s.geometry, s.material, s.capacity);
+  const newMesh = (s: Store, room: number): InstancedMesh => {
+    const mesh = new InstancedMesh(s.geometry, s.material, room);
     mesh.name = s.name;
     mesh.castShadow = !s.cards;
     mesh.receiveShadow = true;
@@ -321,10 +327,35 @@ export function createGardens(kit: SceneryKit): Gardens {
     mesh.instanceMatrix.setUsage(DynamicDrawUsage);
     if (s.depth) mesh.customDepthMaterial = s.depth;
     // Every store tinted, white where a plant has none: one program variant for the shared materials.
-    mesh.instanceColor = new InstancedBufferAttribute(new Float32Array(s.capacity * 3).fill(1), 3);
+    mesh.instanceColor = new InstancedBufferAttribute(new Float32Array(room * 3).fill(1), 3);
     mesh.instanceColor.setUsage(DynamicDrawUsage);
     mesh.count = 0;
     return mesh;
+  };
+  /** The meshes swapped by the cull in progress (`resize`), for the renderer to put in the scene. */
+  let swaps: { removed: InstancedMesh[]; added: InstancedMesh[] } | null = null;
+  /** The store's mesh made anew with room for `room` plants drawn, the first `keep` of the old one's carried over */
+  const resize = (s: Store, room: number, keep: number): void => {
+    const was = s.mesh!;
+    const mesh = newMesh(s, room);
+    (mesh.instanceMatrix.array as Float32Array).set((was.instanceMatrix.array as Float32Array).subarray(0, keep * 16));
+    (mesh.instanceColor!.array as Float32Array).set((was.instanceColor!.array as Float32Array).subarray(0, keep * 3));
+    const shown = new Int32Array(room).fill(-1);
+    shown.set(s.shown.subarray(0, keep));
+    s.shown = shown;
+    mesh.visible = was.visible;
+    mesh.boundingSphere = was.boundingSphere;
+    mesh.count = Math.min(was.count, keep);
+    was.dispose();
+    swaps ??= { removed: [], added: [] };
+    // One made in this same cull never reached the scene: it only leaves the list of those to put in.
+    const fresh = swaps.added.indexOf(was);
+    if (fresh >= 0) swaps.added.splice(fresh, 1);
+    else swaps.removed.push(was);
+    swaps.added.push(mesh);
+    s.mesh = mesh;
+    // A new buffer: everything kept goes up with it.
+    s.firstChanged = 0;
   };
   /** The store's arrays sized for `capacity`; packed (`pack`), its live runs from slot 0 in the order they stood. */
   const repack = (s: Store, capacity: number, pack: boolean): void => {
@@ -399,8 +430,9 @@ export function createGardens(kit: SceneryKit): Gardens {
       const slots = node.slots![s.index]!;
       const mesh = s.mesh;
       if (!mesh || slots.length === 0 || !drawnNow(s)) continue;
-      const sp = s.spheres, shown = s.shown, matrices = s.matrices, colours = s.colours;
-      const target = mesh.instanceMatrix.array as Float32Array, tints = mesh.instanceColor!.array as Float32Array;
+      const sp = s.spheres, matrices = s.matrices, colours = s.colours;
+      let shown = s.shown;
+      let target = mesh.instanceMatrix.array as Float32Array, tints = mesh.instanceColor!.array as Float32Array;
       let n = s.drawn;
       for (const i of slots) {
         const r = sp[i * 4 + 3]!;
@@ -410,6 +442,13 @@ export function createGardens(kit: SceneryKit): Gardens {
           probe.center.set(sp[i * 4]!, sp[i * 4 + 1]!, sp[i * 4 + 2]!);
           probe.radius = r + SHADOW_REACH;
           if (!cullFrustum!.intersectsSphere(probe)) continue;
+        }
+        // More in view than the mesh has room for: twice the room.
+        if (n === shown.length) {
+          resize(s, n * 2, n);
+          shown = s.shown;
+          target = s.mesh!.instanceMatrix.array as Float32Array;
+          tints = s.mesh!.instanceColor!.array as Float32Array;
         }
         // Written only when this position held another plant.
         if (shown[n] !== i) {
@@ -456,29 +495,24 @@ export function createGardens(kit: SceneryKit): Gardens {
         const was = s.mesh;
         let moved = false;
         if (s.dead > 0 && s.dead * 2 >= s.used + coming) {
-          // Half the store dead: packed again in the order the runs stood, the new ones after.
-          repack(s, Math.max(s.capacity, MIN_CAPACITY), true);
+          // Half the store dead: packed again in the order the runs stood, the new ones after, in arrays sized for what lives.
+          repack(s, Math.max(MIN_CAPACITY, (s.used - s.dead + coming) * 2), true);
           moved = true;
         }
-        if (s.used + coming > s.capacity) {
-          repack(s, Math.max(MIN_CAPACITY, (s.used + coming) * 2), false);
-          s.mesh = null;
-        }
+        if (s.used + coming > s.capacity) repack(s, Math.max(MIN_CAPACITY, (s.used + coming) * 2), false);
         for (const list of fresh) {
           const one = packOf(list).get(s.key);
           if (one) append(s, list, one);
         }
-        if (!s.mesh && s.capacity > 0) s.mesh = newMesh(s);
+        // The mesh holds what is drawn, not the store: it starts small and the cull gives it room (`resize`).
+        if (!s.mesh && s.capacity > 0) { s.mesh = newMesh(s, MIN_CAPACITY); s.shown = new Int32Array(MIN_CAPACITY).fill(-1); }
         if (s.mesh && s.bounds) s.mesh.boundingSphere = new Sphere(new Vector3(s.bounds.x, s.bounds.y, s.bounds.z), s.bounds.r);
         if (was !== s.mesh) {
           if (was) { removed.push(was); was.dispose(); }
           if (s.mesh) added.push(s.mesh);
         }
         // DO NOT forget every store's positions at every building
-        if (moved || was !== s.mesh) {
-          if (s.shown.length < s.capacity) s.shown = new Int32Array(s.capacity);
-          s.shown.fill(-1);
-        }
+        if (moved) s.shown.fill(-1);
       }
       growAncestors();
       // Slots came or went: the next cull draws them.
@@ -499,17 +533,19 @@ export function createGardens(kit: SceneryKit): Gardens {
       }
     },
     cull(frustum: Frustum, view: Matrix4) {
-      if (culledFor && culledFor.equals(view)) return;
+      if (culledFor && culledFor.equals(view)) return NO_SWAP;
       culledFor = (culledFor ?? new Matrix4()).copy(view);
       for (const s of stores) { s.drawn = 0; s.firstChanged = Infinity; }
       cullFrustum = frustum;
       for (const root of rootOrder) visit(root, ALL_PLANES);
       cullFrustum = null;
       for (const s of stores) {
-        const mesh = s.mesh;
-        if (!mesh) continue;
+        if (!s.mesh) continue;
         // Left out at the map zoom: nothing drawn, its buffer as it was.
-        if (!drawnNow(s)) { mesh.count = 0; continue; }
+        if (!drawnNow(s)) { s.mesh.count = 0; continue; }
+        // Under a quarter of its room in use: half the room, the plants drawn carried over (twice, then a quarter: never at every small change).
+        if (s.drawn * 4 < s.shown.length && s.shown.length > MIN_CAPACITY) resize(s, Math.max(MIN_CAPACITY, s.drawn * 2), s.drawn);
+        const mesh = s.mesh;
         // Only the positions whose plant changed go to the GPU; the same plants in view
         if (s.firstChanged < s.drawn) {
           markRange(mesh.instanceMatrix, s.firstChanged * 16, (s.drawn - s.firstChanged) * 16);
@@ -517,6 +553,9 @@ export function createGardens(kit: SceneryKit): Gardens {
         }
         mesh.count = s.drawn;
       }
+      const swapped = swaps ?? NO_SWAP;
+      swaps = null;
+      return swapped;
     },
     exclude() { /* a garden's plants are the building's own */ },
     dispose() {

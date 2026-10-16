@@ -172,4 +172,31 @@ describe('instances kept thing by thing', () => {
     expect(mesh.count).toBe(count);
     layer.dispose();
   });
+
+  it('holds on the GPU room for what is drawn, not for every instance of the town', () => {
+    const rng = new Rng(11);
+    const layer = createInstanceRuns('test', specs, SHADOW_REACH);
+    layer.update({ added: Array.from({ length: 3000 }, () => thing(rng, (rng.float() - 0.5) * m(9000), (rng.float() - 0.5) * m(9000), m(40)).run), removed: [] });
+    const look = (x: number, z: number, far: number): void => {
+      const camera = new PerspectiveCamera(50, 1.6, 1, far);
+      camera.position.set(x, m(60), z);
+      camera.lookAt(x + m(100), 0, z - m(100));
+      camera.updateMatrixWorld();
+      const view = new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      layer.cull(new Frustum().setFromProjectionMatrix(view), view);
+    };
+    const room = (): number => layer.meshes.reduce((n, mesh) => n + mesh.instanceMatrix.count, 0);
+    const drawn = (): number => layer.meshes.reduce((n, mesh) => n + mesh.count, 0);
+    look(0, 0, m(300));
+    const near = room();
+    expect(near).toBeLessThan(2_000);
+    expect(drawn()).toBeGreaterThan(0);
+    // The whole town in view: room grown to it; back to the street: given back.
+    look(0, m(9000), m(30000));
+    expect(room()).toBeGreaterThanOrEqual(drawn());
+    expect(drawn()).toBeGreaterThan(near);
+    look(0, 0, m(300));
+    expect(room()).toBeLessThanOrEqual(Math.max(near * 2, 64 * specs.length * 2));
+    layer.dispose();
+  });
 });
