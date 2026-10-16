@@ -1671,6 +1671,12 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
   /** The land without the rivers (`rebuildWater`: the level a river's channel was cut into), kept with `index`. */
   let landIndex = new TerrainIndex([], 0);
   let revision = -1;
+  /** @rebuild The plate's stamps indexed whole: its first build, the land under them changed, a list changed otherwise than at its end. */
+  const indexAll = (doc: TerrainSource): void => {
+    index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
+    landIndex = new TerrainIndex([], revision, index.relief, index.ground);
+    for (const stamp of index.stamps) if (stamp.mode !== 'river') landIndex.add(stamp, revision);
+  };
 
   /** The land the player sculpted, with no road in it. */
   const naturalHeightAt = (x: number, y: number): number =>
@@ -2578,10 +2584,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
           index.add(stamp, revision);
           if (stamp.mode !== 'river') landIndex.add(stamp, revision);
         }
-      } else {
-        index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
-        landIndex = new TerrainIndex(doc.terrainStamps.filter((stamp) => stamp.mode !== 'river'), revision, index.relief, index.ground);
-      }
+      } else indexAll(doc);
 
       // Only the cells the stamps added or taken reach are rewritten, each stamp's box with every stamp over it.
       let box: readonly [number, number, number, number] | null = null;
