@@ -124,6 +124,29 @@ describe('TerrainIndex', () => {
     }
   });
 
+  it('grown stamp by stamp answers what an index of them all answers', () => {
+    // Strokes, rough dabs, a flatten and a river: the order of the stamps over a point matters to all of them.
+    const laid = stamps.map((s, i) => ({ ...s, ...(i % 4 === 0 ? { stroke: Math.floor(i / 8) } : {}), ...(i % 5 === 0 ? { rough: true } : {}),
+      mode: (i % 11 === 0 ? 'flatten' : i % 13 === 0 ? 'river' : i % 3 === 0 ? 'lower' : 'raise') as TerrainStamp['mode'], level: 2 }));
+    const grown = new TerrainIndex(laid.slice(0, 7), 1);
+    for (const s of laid.slice(7)) grown.add(s, 2);
+    const whole = new TerrainIndex(laid, 2);
+    expect(grown.stamps).toEqual(whole.stamps);
+    for (let i = 0; i < 400; i++) {
+      const x = -600 + i * 3.1, y = -300 + ((i * 37) % 600);
+      expect(sampleTerrainHeight(grown, x, y)).toBe(sampleTerrainHeight(whole, x, y));
+    }
+    // The last ones undone: what an index of those left answers.
+    for (let k = 0; k < 20; k++) grown.pop(3);
+    const left = new TerrainIndex(laid.slice(0, laid.length - 20), 3);
+    expect(grown.stamps).toEqual(left.stamps);
+    for (let i = 0; i < 400; i++) {
+      const x = -600 + i * 3.1, y = -300 + ((i * 37) % 600);
+      expect(sampleTerrainHeight(grown, x, y)).toBe(sampleTerrainHeight(left, x, y));
+      expect(grown.near(x, y)).toEqual(left.near(x, y));
+    }
+  });
+
   it('copies the stamp list rather than aliasing it', () => {
     const live = [...stamps];
     const index = new TerrainIndex(live, 1);

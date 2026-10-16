@@ -42,11 +42,13 @@ import type { ChangeJournal } from '@world/changes';
 import { MAP_HALF, PLATE_SIZE } from '@world/bounds';
 import {
   MAX_TERRAIN_STAMPS,
+  RELIEF_LEGACY,
   RIVER_BED_FLOOR,
   TERRAIN_WATER_HEIGHT,
   TerrainIndex,
   sampleTerrainHeight,
   terrainInfluence,
+  type ReliefVersion,
   type TerrainStamp,
 } from '@world/terrain';
 import { bakeSurface, fbm, makeNoise, type SurfaceBake, type SurfaceRecipe } from './mesh/textureBaker';
@@ -1653,6 +1655,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
   water.visible = false;
 
   let index = new TerrainIndex([], 0);
+  /** The land without the rivers (`rebuildWater`: the level a river's channel was cut into), kept with `index`. */
+  let landIndex = new TerrainIndex([], 0);
   let revision = -1;
 
   /** The land the player sculpted, with no road in it. */
@@ -2068,8 +2072,6 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
 
   const rebuildWater = (stamps: readonly TerrainStamp[]): void => {
     // A river stands at the level its channel was cut INTO, below the banks
-    const land = stamps.filter((stamp) => stamp.mode !== 'river');
-    const landIndex = new TerrainIndex(land, 0, index.relief, index.ground);
     const landAt = (x: number, y: number): number => TERRAIN_BASE + sampleTerrainHeight(landIndex, x, y);
 
     // A river drawn as a stroke is ONE body of water along its course
@@ -2475,16 +2477,26 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       diary = doc.changes;
       if (revision === doc.terrainRevision) return false;
       const firstBuild = revision < 0;
-      const previous = index;
       revision = doc.terrainRevision;
-      index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
-
-      // Only the cells a new stamp reaches are rewritten.
-      const added = doc.terrainStamps.length === previous.stamps.length + 1
-        ? doc.terrainStamps[doc.terrainStamps.length - 1]
-        : undefined;
-      // The same land under them (relief and ground), and the stamps it had: the land moved by the new stamp alone.
-      const sameHistory = added !== undefined && stampAppended(previous.stamps, doc.terrainStamps, previous.relief === index.relief && previous.ground === index.ground);
+      // The stamps the brush added at the end, or an undo took from it, over the same land (relief and ground): the land moved by them alone.
+      const tail = firstBuild ? null : stampTail(index, doc.terrainStamps, doc.terrainRelief ?? RELIEF_LEGACY, doc.terrainGround);
+      // Their boxes (corners) and how many corners: past a whole plate's worth, the whole plate is rewritten once.
+      const boxes = tail ? [...tail.removed, ...tail.added].map(stampCorners) : null;
+      const changed = boxes && boxes.reduce((sum, b) => sum + (b[1] - b[0] + 1) * (b[3] - b[2] + 1), 0) <= GRID * GRID ? boxes : null;
+      if (tail) {
+        // DO NOT index every stamp again for the few the brush laid or an undo took: the index changes at its end, as the list did.
+        for (let k = tail.removed.length - 1; k >= 0; k--) {
+          index.pop(revision);
+          if (tail.removed[k]!.mode !== 'river') landIndex.pop(revision);
+        }
+        for (const stamp of tail.added) {
+          index.add(stamp, revision);
+          if (stamp.mode !== 'river') landIndex.add(stamp, revision);
+        }
+      } else {
+        index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
+        landIndex = new TerrainIndex(doc.terrainStamps.filter((stamp) => stamp.mode !== 'river'), revision, index.relief, index.ground);
+      }
 
       // The first build worked out off the page (`plateMesh.ts`, as Cesium builds its terrain meshes in a worker)
       const made = firstBuild && prebuilt && doc.terrainStamps.length === 0 ? prebuilt : null;
@@ -2512,44 +2524,36 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         return true;
       }
 
+      // Only the cells the stamps added or taken reach are rewritten, each stamp's box with every stamp over it.
       let box: readonly [number, number, number, number] | null = null;
-      if (firstBuild || !added || !sameHistory) {
+      if (!changed) {
         rewrite(0, GRID - 1, 0, GRID - 1);
-        lastRegion = null;
+        markAll(position as BufferAttribute);
+        retriangulate(0, GRID - 1, 0, GRID - 1);
+        wholePlateMoved();
       } else {
-        const reach = added.radius + TERRAIN_CELL;
-        const cx0 = Math.max(0, Math.floor((added.x - reach + TERRAIN_HALF) / TERRAIN_CELL));
-        const cx1 = Math.min(GRID - 1, Math.ceil((added.x + reach + TERRAIN_HALF) / TERRAIN_CELL));
-        const cy0 = Math.max(0, Math.floor((TERRAIN_HALF - (added.y + reach)) / TERRAIN_CELL));
-        const cy1 = Math.min(GRID - 1, Math.ceil((TERRAIN_HALF - (added.y - reach)) / TERRAIN_CELL));
-        // A `flatten` stamp scales everything under it
-        rewrite(cx0, cx1, cy0, cy1);
-        box = [cx0, cx1, cy0, cy1];
-        lastRegion = box;
-      }
-
-      if (box) markBox(position as BufferAttribute, 3, GRID, box[0], box[1], box[2], box[3]);
-      else markAll(position as BufferAttribute);
-      if (box) retriangulate(box[0], Math.min(GRID - 1, box[1] + 1), box[2], Math.min(GRID - 1, box[3] + 1));
-      else retriangulate(0, GRID - 1, 0, GRID - 1);
-      if (box) {
-        // Only the corners the dab rewrote can have tilted, with their ring of neighbours
         const moved: number[] = [];
-        for (let iy = box[2]; iy <= box[3]; iy++) {
-          for (let ix = box[0]; ix <= box[1]; ix++) moved.push(iy * GRID + ix);
+        for (const [cx0, cx1, cy0, cy1] of changed) {
+          // A `flatten` stamp scales everything under it
+          rewrite(cx0, cx1, cy0, cy1);
+          markBox(position as BufferAttribute, 3, GRID, cx0, cx1, cy0, cy1);
+          retriangulate(cx0, Math.min(GRID - 1, cx1 + 1), cy0, Math.min(GRID - 1, cy1 + 1));
+          // Only the corners the dab rewrote can have tilted, with their ring of neighbours
+          for (let iy = cy0; iy <= cy1; iy++) for (let ix = cx0; ix <= cx1; ix++) moved.push(iy * GRID + ix);
+          box = box ? [Math.min(box[0], cx0), Math.max(box[1], cx1), Math.min(box[2], cy0), Math.max(box[3], cy1)] : [cx0, cx1, cy0, cy1];
         }
         refreshNormals(moved);
-        // The bounds grown over the corners the dab moved (`Sphere.expandByPoint`), as the shaping pass does
+        // The bounds grown over the corners the dabs moved (`Sphere.expandByPoint`), as the shaping pass does
         const sphere = geometry.boundingSphere!;
-        const position = geometry.getAttribute('position');
         for (const i of moved) sphere.expandByPoint(spherePoint.fromBufferAttribute(position, i));
-      } else wholePlateMoved();
+      }
+      lastRegion = box;
       lastStamps = index.stamps;
       // The water - every pool and river on the map - is the deferred part of a stroke
       if (stroking) {
         waterStale = true;
         // A river dab makes water; any other dab is its box.
-        markWaterDirty(added && added.mode !== 'river' ? box : null);
+        markWaterDirty(tail && box && !tail.removed.some((s) => s.mode === 'river') && !tail.added.some((s) => s.mode === 'river') ? box : null);
       } else { waterStale = false; waterDirty = null; rebuildWater(lastStamps); }
       markLand(box ? { x0: box[0], x1: box[1], y0: box[2], y1: box[3] } : 'all');
       return true;
@@ -2942,8 +2946,23 @@ function pushWetTriangle(
   }
 }
 
-/** Whether the land changed by one stamp added to the stamps it had, over the same land under them (`sameLand`). */
-export function stampAppended(previous: readonly unknown[], now: readonly unknown[], sameLand: boolean): boolean {
-  if (!sameLand || now.length !== previous.length + 1) return false;
-  return previous.length === 0 || previous[0] === now[0];
+/** The corners (x0, x1, y0, y1, inclusive) a stamp can move, a cell round its disc, on a plate's grid. */
+function stampCorners(stamp: TerrainStamp): readonly [number, number, number, number] {
+  const reach = stamp.radius + TERRAIN_CELL;
+  return [
+    Math.max(0, Math.floor((stamp.x - reach + TERRAIN_HALF) / TERRAIN_CELL)), Math.min(GRID - 1, Math.ceil((stamp.x + reach + TERRAIN_HALF) / TERRAIN_CELL)),
+    Math.max(0, Math.floor((TERRAIN_HALF - (stamp.y + reach)) / TERRAIN_CELL)), Math.min(GRID - 1, Math.ceil((TERRAIN_HALF - (stamp.y - reach)) / TERRAIN_CELL)),
+  ];
+}
+
+/** How `now` differs from the stamps `index` holds at its end only (the brush adding, an undo taking), over the same land (relief and ground); null otherwise. */
+export function stampTail(index: TerrainIndex, now: readonly TerrainStamp[], relief: ReliefVersion, ground: ((x: number, y: number) => number) | undefined):
+  { readonly removed: readonly TerrainStamp[]; readonly added: readonly TerrainStamp[] } | null {
+  const had = index.stamps;
+  if (index.relief !== relief || index.ground !== ground) return null;
+  // The part both hold: the shorter list, the same at its first and last stamp (the lists only ever grow and shrink at their end).
+  const kept = Math.min(had.length, now.length);
+  if (kept > 0 && (now[0] !== had[0] || now[kept - 1] !== had[kept - 1])) return null;
+  if (had.length === now.length) return null;
+  return { removed: had.slice(kept), added: now.slice(kept) };
 }

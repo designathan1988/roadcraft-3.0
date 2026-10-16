@@ -160,9 +160,10 @@ function baseReliefTuned(x: number, y: number): number {
 /** A uniform grid over the stamps, so a height query touches only nearby ones. */
 export class TerrainIndex {
   private readonly buckets = new Map<number, TerrainStamp[]>();
-  readonly stamps: readonly TerrainStamp[];
-  /** The revision the caller built it at (`RoadDoc.terrainRevision`), kept for it; the index itself never reads it. */
-  readonly revision: number;
+  /** The stamps, in authoring order: its own list, copied from the caller's and grown by `add`. */
+  private readonly list: TerrainStamp[];
+  /** The revision the caller built it at, or last added to it at (`RoadDoc.terrainRevision`), kept for it; the index itself never reads it. */
+  revision: number;
   /** The land under the stamps (`ReliefVersion`). */
   readonly relief: ReliefVersion;
 
@@ -173,23 +174,52 @@ export class TerrainIndex {
     this.relief = relief;
     this.ground = ground;
     // COPIED, not aliased.
-    this.stamps = stamps.slice();
+    this.list = stamps.slice();
     this.revision = revision;
-    // DO NOT size the cell by the widest stamp: one wide stamp
-    for (const stamp of stamps) {
-      const x0 = Math.floor((stamp.x - stamp.radius) / STAMP_CELL);
-      const x1 = Math.floor((stamp.x + stamp.radius) / STAMP_CELL);
-      const y0 = Math.floor((stamp.y - stamp.radius) / STAMP_CELL);
-      const y1 = Math.floor((stamp.y + stamp.radius) / STAMP_CELL);
-      for (let x = x0; x <= x1; x++) {
-        for (let y = y0; y <= y1; y++) {
-          const key = stampCellKey(x, y);
-          const bucket = this.buckets.get(key);
-          if (bucket) bucket.push(stamp);
-          else this.buckets.set(key, [stamp]);
-        }
-      }
-    }
+    for (const stamp of stamps) this.file(stamp);
+  }
+
+  /** The stamps, in authoring order (the index's own: the caller's list may change after). */
+  get stamps(): readonly TerrainStamp[] {
+    return this.list;
+  }
+
+  /** DO NOT build a new index of every stamp for one the brush laid: it is filed in the cells it covers, last in each. */
+  add(stamp: TerrainStamp, revision: number): void {
+    this.list.push(stamp);
+    this.file(stamp);
+    this.revision = revision;
+  }
+
+  /** Takes the last stamp away (an undo of the brush), from its cells too, where it is last as well; returns it. */
+  pop(revision: number): TerrainStamp | undefined {
+    const stamp = this.list.pop();
+    if (!stamp) return undefined;
+    this.cellsOf(stamp, (key) => {
+      const bucket = this.buckets.get(key)!;
+      bucket.pop();
+      if (bucket.length === 0) this.buckets.delete(key);
+    });
+    this.revision = revision;
+    return stamp;
+  }
+
+  /** A stamp put last in every cell its disc covers. DO NOT size the cell by the widest stamp: one wide stamp */
+  private file(stamp: TerrainStamp): void {
+    this.cellsOf(stamp, (key) => {
+      const bucket = this.buckets.get(key);
+      if (bucket) bucket.push(stamp);
+      else this.buckets.set(key, [stamp]);
+    });
+  }
+
+  /** The keys of the cells a stamp's disc covers. */
+  private cellsOf(stamp: TerrainStamp, visit: (key: number) => void): void {
+    const x0 = Math.floor((stamp.x - stamp.radius) / STAMP_CELL);
+    const x1 = Math.floor((stamp.x + stamp.radius) / STAMP_CELL);
+    const y0 = Math.floor((stamp.y - stamp.radius) / STAMP_CELL);
+    const y1 = Math.floor((stamp.y + stamp.radius) / STAMP_CELL);
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) visit(stampCellKey(x, y));
   }
 
   /** The stamps that can affect a point, in authoring order. */

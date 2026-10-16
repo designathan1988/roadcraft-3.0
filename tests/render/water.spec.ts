@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Mesh } from 'three';
 
 import { unifiedWaterGeometry, type WaterStamp } from '@render/terrain';
+import type { TerrainStamp } from '@world/terrain';
 import {
   WATER_CLOCK_WRAP,
   WATER_DEPTH_ATTRIBUTE,
@@ -270,15 +271,23 @@ describe('unifiedWaterGeometry', () => {
 
 describe('a crater in a map with no stamps', () => {
   it('rewrites only its own box, not the whole map', async () => {
-    const { stampAppended } = await import('@render/terrain');
-    const crater = { id: 1 };
+    const { stampTail } = await import('@render/terrain');
+    const { TerrainIndex, RELIEF_LEGACY, RELIEF_NATURAL } = await import('@world/terrain');
+    const stamp = (id: number): TerrainStamp => ({ id, x: id, y: 0, radius: 10, strength: 1, mode: 'raise' });
+    const crater = stamp(1);
     // The bomb's crater, the first stamp of a generated city, over the same land.
-    expect(stampAppended([], [crater], true)).toBe(true);
+    expect(stampTail(new TerrainIndex([], 0), [crater], RELIEF_LEGACY, undefined)).toEqual({ removed: [], added: [crater] });
     // The land under the stamps moved too (another relief, other corners): the whole plate.
-    expect(stampAppended([], [crater], false)).toBe(false);
-    const old = { id: 0 };
-    expect(stampAppended([old], [old, crater], true)).toBe(true);
-    expect(stampAppended([old], [{ id: 9 }, crater], true)).toBe(false);
-    expect(stampAppended([old], [old], true)).toBe(false);
+    expect(stampTail(new TerrainIndex([], 0), [crater], RELIEF_NATURAL, undefined)).toBeNull();
+    expect(stampTail(new TerrainIndex([], 0), [crater], RELIEF_LEGACY, () => 0)).toBeNull();
+    const old = stamp(0);
+    const index = new TerrainIndex([old, crater], 0);
+    // Several laid in one frame: all of them.
+    expect(stampTail(index, [old, crater, stamp(2), stamp(3)], RELIEF_LEGACY, undefined)).toEqual({ removed: [], added: [stamp(2), stamp(3)] });
+    // The last one undone.
+    expect(stampTail(index, [old], RELIEF_LEGACY, undefined)).toEqual({ removed: [crater], added: [] });
+    // Changed otherwise (the oldest dropped at the cap, the same list again).
+    expect(stampTail(index, [crater, stamp(2)], RELIEF_LEGACY, undefined)).toBeNull();
+    expect(stampTail(index, [old, crater], RELIEF_LEGACY, undefined)).toBeNull();
   });
 });
