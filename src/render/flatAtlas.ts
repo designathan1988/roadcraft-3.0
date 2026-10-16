@@ -592,7 +592,9 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       for (const p of shownList) p.surface!.setSun(direction);
       farSurface.setSun(direction);
     },
-    bakeRelief(renderer: WebGLRenderer) {
+    bakeRelief(renderer: WebGLRenderer, focus) {
+      // Each made plate's painted ground written since the last frame, sent before this one is drawn.
+      for (const p of plates) p.surface?.bakeRelief(renderer, focus);
       // The far woods: each plate's fade from whether it is in full and its own trees can grow.
       const now = performance.now() / 1000;
       for (const p of plates) farForest.book.setFull(p.index, p.shown, p.surface?.ecology() != null, now);

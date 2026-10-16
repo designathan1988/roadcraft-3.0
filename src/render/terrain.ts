@@ -21,6 +21,7 @@ import {
   RepeatWrapping,
   SRGBColorSpace,
   Sphere,
+  Box3,
   Vector3,
   type Material,
   type Object3D,
@@ -110,7 +111,7 @@ export interface TerrainSurface {
   readonly ground: Mesh;
   /** Where the sun is (a direction towards it, three's axes) */
   setSun(direction: { readonly x: number; readonly y: number; readonly z: number }): void;
-  /** Once a frame, after `focus`: the map's far woods (`flatAtlas.ts`, `farForest.ts`). */
+  /** Once a frame, after `focus` and before the frame is drawn: the painted ground written since the last one sent, the map's far woods (`flatAtlas.ts`, `farForest.ts`). */
   bakeRelief(renderer: WebGLRenderer, focus: { readonly x: number; readonly z: number } | null): void;
   /** How the rivers and lakes look and move: waves, foam, current (`render/water.ts` WaterLook). */
   setWaterLook(look: WaterLook): void;
@@ -559,18 +560,28 @@ function shoreLevels(water: BufferGeometry, levels: Float32Array, ground: ArrayL
   }
 }
 
-/** The ground texture the terrain shader reads per corner: R the water's level */
-function packGroundCorners(texture: DataTexture, levels: Float32Array, flowers: Float32Array, scrub: Float32Array, forest: Float32Array, sand: Float32Array, basalt: Float32Array): void {
+/** The ground texture the terrain shader reads per corner: R the water's level; `box`: only those corners (null: all). */
+function packGroundCorners(texture: DataTexture, levels: Float32Array, flowers: Float32Array, scrub: Float32Array, forest: Float32Array, sand: Float32Array, basalt: Float32Array, box: CornerRect | null = null): void {
   const data = texture.image.data as Float32Array;
   const byte = (value: number): number => Math.round(Math.min(1, Math.max(0, value)) * 255);
-  for (let k = 0; k < levels.length; k++) {
-    data[k * 4] = levels[k] as number;
-    // Two bytes to a channel, exact in a float: the flowers (the scrub) low, the painted sandstone (basalt) high.
-    data[k * 4 + 1] = byte(flowers[k] as number) + 256 * byte(sand[k] as number);
-    data[k * 4 + 2] = byte(scrub[k] as number) + 256 * byte(basalt[k] as number);
-    data[k * 4 + 3] = forest[k] as number;
+  const { x0, x1, y0, y1 } = box ?? { x0: 0, x1: GRID - 1, y0: 0, y1: GRID - 1 };
+  for (let iy = y0; iy <= y1; iy++) {
+    for (let k = iy * GRID + x0; k <= iy * GRID + x1; k++) {
+      data[k * 4] = levels[k] as number;
+      // Two bytes to a channel, exact in a float: the flowers (the scrub) low, the painted sandstone (basalt) high.
+      data[k * 4 + 1] = byte(flowers[k] as number) + 256 * byte(sand[k] as number);
+      data[k * 4 + 2] = byte(scrub[k] as number) + 256 * byte(basalt[k] as number);
+      data[k * 4 + 3] = forest[k] as number;
+    }
   }
-  texture.needsUpdate = true;
+}
+
+/** The corners (inclusive) within a disc of the plate's map, a corner round, on its grid; rows run from +y downwards. */
+function discCorners(x: number, y: number, radius: number): CornerRect {
+  return {
+    x0: Math.max(0, Math.floor((x - radius + TERRAIN_HALF) / TERRAIN_CELL) - 1), x1: Math.min(GRID - 1, Math.ceil((x + radius + TERRAIN_HALF) / TERRAIN_CELL) + 1),
+    y0: Math.max(0, Math.floor((TERRAIN_HALF - (y + radius)) / TERRAIN_CELL) - 1), y1: Math.min(GRID - 1, Math.ceil((TERRAIN_HALF - (y - radius)) / TERRAIN_CELL) + 1),
+  };
 }
 
 /** Lays one geology dab on the terrain's corners: within its radius the rock moves towards the dab's */
@@ -695,8 +706,8 @@ function paintLayer(texture: DataArrayTexture, layer: number): Uint8Array {
   return (texture.image.data as Uint8Array).subarray(layer * size, (layer + 1) * size);
 }
 
-/** Lays one dab into the weight textures: within its radius every layer moves toward the dab's */
-function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): void {
+/** Lays one dab into the weight textures: within its radius every layer moves toward the dab's; returns the texels it may have written. */
+function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): CornerRect {
   const a = layers[0]!;
   const b = layers[1]!;
   // Rocks lie on bare ground: they lay the soil layer part way.
@@ -723,6 +734,7 @@ function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): void {
       }
     }
   }
+  return { x0, x1, y0, y1 };
 }
 
 /** Side of the forest density grid over the plate (7.8 m a cell). */
@@ -786,6 +798,7 @@ function terrainMaterial(
   shore.minFilter = NearestFilter;
   shore.generateMipmaps = false;
   packGroundCorners(shore, shoreLevelData, flowerCornerData, scrubCornerData, forestCornerData, sandCornerData, basaltCornerData);
+  shore.needsUpdate = true;
   material.userData['shore'] = shore;
   material.userData['sandCorners'] = sandCornerData;
   material.userData['basaltCorners'] = basaltCornerData;
@@ -2121,7 +2134,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     water.geometry = unifiedWaterGeometry(discs, renderedHeightAt, floodCells, ribbons);
     previous.dispose();
     shoreLevels(water.geometry, material.userData['shoreLevels'] as Float32Array, grid);
-    packGroundCorners(material.userData['shore'] as DataTexture, material.userData['shoreLevels'] as Float32Array, material.userData['flowerCorners'] as Float32Array, material.userData['scrubCorners'] as Float32Array, material.userData['forestCorners'] as Float32Array, material.userData['sandCorners'] as Float32Array, material.userData['basaltCorners'] as Float32Array);
+    packShore(null);
     water.geometry.computeBoundingBox();
     const box = water.geometry.boundingBox;
     // In world (x, y): the mesh is three's (x, height, -y).
@@ -2207,9 +2220,48 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     paint = [paintLayer(next, 0), paintLayer(next, 1)];
     lightLayer = paintLayer(next, LIGHT_LAYER);
     small.dispose();
+    // The new array goes whole when first drawn.
+    paintDirty = null;
+    lightDirty = null;
   };
   paintArray.addLayerUpdate(LIGHT_LAYER);
   paintArray.needsUpdate = true;
+  /** DO NOT send a whole layer of the painted ground (4 MB) for a dab: the texels written since the last frame, a box of layers 0-1 and one of the light's. */
+  let paintDirty: CornerRect | null = null;
+  let lightDirty: CornerRect | null = null;
+  /** The array's own data as a texture never drawn, so `copyTextureToTexture` sends a box of it from the page (three.js r186). */
+  let paintSource: DataTexture | null = null;
+  const paintRegion = new Box3();
+  const paintAt = new Vector3();
+  /** The boxes written since the last frame, sent before it is drawn (`bakeRelief`). */
+  const sendPaint = (renderer: WebGLRenderer): void => {
+    if (!paintDirty && !lightDirty) return;
+    if (paintSource?.image.data !== paintArray.image.data) paintSource = new DataTexture(paintArray.image.data, paintRes, paintRes, RGBAFormat, UnsignedByteType);
+    for (const [box, z0, z1] of [[paintDirty, 0, 1], [lightDirty, LIGHT_LAYER, LIGHT_LAYER]] as const) {
+      if (!box) continue;
+      paintRegion.min.set(box.x0, box.y0, z0);
+      paintRegion.max.set(box.x1 + 1, box.y1 + 1, z1 + 1);
+      renderer.copyTextureToTexture(paintSource, paintArray, paintRegion, paintAt.set(box.x0, box.y0, z0));
+    }
+    paintDirty = null;
+    lightDirty = null;
+  };
+  /** The ground texture of the corners (`packGroundCorners`): waiting to go whole (made, or packed whole) until three.js sent it */
+  const shore = material.userData['shore'] as DataTexture;
+  let shoreWhole = true;
+  shore.onUpdate = () => { shoreWhole = false; };
+  const packShore = (box: CornerRect | null): void => {
+    packGroundCorners(shore, material.userData['shoreLevels'] as Float32Array, material.userData['flowerCorners'] as Float32Array, material.userData['scrubCorners'] as Float32Array,
+      material.userData['forestCorners'] as Float32Array, material.userData['sandCorners'] as Float32Array, material.userData['basaltCorners'] as Float32Array, box);
+    shore.needsUpdate = true;
+    if (box && !shoreWhole && shore.updateRanges.length + box.y1 - box.y0 + 1 <= GRID) {
+      // Row by row: three.js r186 sends a texture's ranges a row at a time (`WebGLTextures.updateTexture`, RGBA only).
+      for (let iy = box.y0; iy <= box.y1; iy++) shore.addUpdateRange((iy * GRID + box.x0) * 4, (box.x1 - box.x0 + 1) * 4);
+      return;
+    }
+    shore.clearUpdateRanges();
+    shoreWhole = true;
+  };
   // The corners whose heights moved since the light was last asked for
   let landMoved: CornerRect | 'all' | null = 'all';
   const markLand = (rect: CornerRect | 'all'): void => {
@@ -2231,8 +2283,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       const row = (iy - rect.y0) * width * 4;
       lightLayer.set(rgba.subarray(row, row + width * 4), (iy * paintRes + rect.x0) * 4);
     }
-    paintArray.addLayerUpdate(LIGHT_LAYER);
-    paintArray.needsUpdate = true;
+    // Sent as a box before the next frame (`sendPaint`); the light layer's texels are its corners.
+    lightDirty = lightDirty ? unionCorners(lightDirty, rect) : rect;
     performance.measure('hitch:terrain-light', { start: startedAt, end: performance.now() });
     performance.measure('terrain-light/worker', { start: startedAt - result.ms, end: startedAt, detail: `${width}x${rect.y1 - rect.y0 + 1} corners` });
     // Rows run from +y downwards.
@@ -2295,11 +2347,15 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     // Whether a dab of ground or cover was laid: the plants follow those, and a dab of geology changes neither.
     let covered = false;
     const geologyRects: (readonly [number, number, number, number])[] = [];
+    /** The corners the dabs laid can have changed (their covers, their rock), or null for none. */
+    let changed: CornerRect | null = null;
+    const touch = (box: CornerRect): void => { changed = changed ? unionCorners(changed, box) : box; };
     // Something to lay: the array at its full size first.
     if (dabs.length > 0) growPaint();
     const lay = (dab: PaintDab): void => {
       if (isGeologyKind(dab.kind)) {
         geologyRects.push(rasterGeology(sandCorners, basaltCorners, dab));
+        touch(discCorners(dab.x, dab.y, dab.radius));
         ecologyAll();
         return;
       }
@@ -2309,12 +2365,16 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         ecologyAll();
         return;
       }
-      rasterPaint(paint, dab);
+      const texels = rasterPaint(paint, dab);
+      paintDirty = paintDirty ? unionCorners(paintDirty, texels) : texels;
       rasterCover(covers, dab);
+      // A corner reads the cover cell it stands in (`coverAt`): the cells the dab wrote, two cells round.
+      touch(discCorners(dab.x, dab.y, dab.radius + 2 * (TERRAIN_SIZE / FOREST_RES)));
       covered = true;
     };
     // Dabs only added since the last time: lay just those.
-    if (dabs.length >= paintCount && dabs[0] === paintFirst && paintCount > 0) {
+    const added = dabs.length >= paintCount && dabs[0] === paintFirst && paintCount > 0;
+    if (added) {
       for (let i = paintCount; i < dabs.length; i++) lay(dabs[i]!);
       if (geologyRects.length > 0) geologyChanges.mark(geologyRects);
     } else {
@@ -2331,29 +2391,30 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     }
     paintCount = dabs.length;
     paintFirst = dabs[0];
-    if (!covered) {
-      packGroundCorners(material.userData['shore'] as DataTexture, material.userData['shoreLevels'] as Float32Array, material.userData['flowerCorners'] as Float32Array, material.userData['scrubCorners'] as Float32Array, material.userData['forestCorners'] as Float32Array, sandCorners, basaltCorners);
-      return;
-    }
-    forestRevision++;
-    paintArray.addLayerUpdate(0);
-    paintArray.addLayerUpdate(1);
-    paintArray.needsUpdate = true;
-    {
-      // The flowers and the scrub at each terrain corner, into the shader's ground texture.
+    // Laid again whole: the corners and the painted layers all go.
+    const box: CornerRect | null = added ? changed : { x0: 0, x1: GRID - 1, y0: 0, y1: GRID - 1 };
+    if (covered) {
+      forestRevision++;
+      if (!added) {
+        paintArray.addLayerUpdate(0);
+        paintArray.addLayerUpdate(1);
+        paintArray.needsUpdate = true;
+        paintDirty = null;
+      }
+      // The flowers and the scrub at each corner the dabs reach, into the shader's ground texture.
       const flowers = material.userData['flowerCorners'] as Float32Array;
       const scrub = material.userData['scrubCorners'] as Float32Array;
       const forest = material.userData['forestCorners'] as Float32Array;
-      for (let iy = 0; iy < GRID; iy++) {
-        for (let ix = 0; ix < GRID; ix++) {
+      for (let iy = box!.y0; iy <= box!.y1; iy++) {
+        for (let ix = box!.x0; ix <= box!.x1; ix++) {
           const x = -TERRAIN_HALF + ix * TERRAIN_CELL, y = TERRAIN_HALF - iy * TERRAIN_CELL;
           flowers[iy * GRID + ix] = coverAt('flowers', x, y);
           scrub[iy * GRID + ix] = coverAt('scrub', x, y);
           forest[iy * GRID + ix] = coverAt('forest', x, y);
         }
       }
-      packGroundCorners(material.userData['shore'] as DataTexture, material.userData['shoreLevels'] as Float32Array, flowers, scrub, forest, sandCorners, basaltCorners);
     }
+    if (box) packShore(added ? box : null);
   };
 
   const parts: TerrainPart[] = [];
@@ -2379,7 +2440,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     // The gullies were drawn by the fine relief alone; it was read by nothing the ground draws (see `bakeRelief`).
     setGullies() {},
     setWaterLook(look) { waterSurface.setLook(look); },
-    bakeRelief() {},
+    bakeRelief(renderer) { sendPaint(renderer); },
     vergeMaterial,
     updatePaint,
     get ecologyPending() { return ecologyStale && !waterStale; },
