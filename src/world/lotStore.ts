@@ -199,26 +199,37 @@ export class LotStore {
     return gone;
   }
 
-  /** Puts lots back as they were, or takes them away (`undefined`): undo and redo (`world/docImage.ts`), all in one entry. */
-  restore(records: readonly { readonly id: number; readonly value: Lot | undefined }[], cause: string): void {
+  /** Puts lots back as they were, or takes them away (`undefined`): undo and redo (`world/docImage.ts`), all in one entry */
+  restore(records: readonly { readonly id: number; readonly value: Lot | undefined; readonly order?: number }[], cause: string): void {
     const ids: number[] = [];
     const rects: ChangeRect[] = [];
-    for (const { id, value } of records) {
+    const last: { lot: Lot; order: number }[] = [];
+    for (const { id, value, order } of records) {
       const was = this.items.get(id);
       if (!was && value === undefined) continue;
       if (was) rects.push(lotBox(was));
       if (value === undefined) this.drop(id);
-      else if (was) {
+      else if (was && (order === undefined || this.order.get(id) === order)) {
         this.leaveBelow();
         this.items.set(id, value);
         this.filing?.file(id, value, lotBox(value));
         this.listed = null;
+      } else if (order !== undefined) {
+        // Put last in the order it was given (`replaceWith` does the same with a copy's places).
+        if (was) this.drop(id);
+        last.push({ lot: value, order });
+        this.ids.reserve(id);
       } else {
         this.append(value);
         this.ids.reserve(id);
       }
       if (value) rects.push(lotBox(value));
       ids.push(id);
+    }
+    last.sort((a, b) => a.order - b.order);
+    for (const { lot, order } of last) {
+      this.append(lot, order);
+      this.nextOrder = Math.max(this.nextOrder, order + 1);
     }
     if (ids.length) this.journal.record('lots', rects, { ids, cause });
   }

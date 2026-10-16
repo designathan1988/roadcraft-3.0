@@ -1655,7 +1655,7 @@ export class RoadDoc {
     // DO NOT write `traffic` for every road record: an undo of a node raised rebuilt the simulation's plan.
     let traffic = false;
     const roadIds: number[] = [];
-    const lotRecords: { id: number; value: Lot | undefined }[] = [];
+    const lotRecords: { id: number; value: Lot | undefined; order?: number }[] = [];
     // Where the roads stand: each record's own rectangle, and a node's roads (its move moves them).
     const roadRects = (): void => {
       for (const { part, id } of r.records) {
@@ -1686,7 +1686,7 @@ export class RoadDoc {
     };
     roadRects();
     itemRects();
-    for (const { part, id, value } of r.records) {
+    for (const { part, id, value, order } of r.records) {
       const put = <T>(map: Map<number, T>): void => { if (value === undefined) map.delete(id); else map.set(id, structuredClone(value) as T); };
       switch (part) {
         case 'nodes': {
@@ -1705,7 +1705,7 @@ export class RoadDoc {
           kinds.add('barriers'); break;
         case 'buildings': this.buildings.restore(id as BuildingId, value as Building | undefined); break;
         // Kept by reference, as the buildings (`LotStore` OWNERSHIP); all of them in one entry, below.
-        case 'lots': lotRecords.push({ id, value: value as Lot | undefined }); break;
+        case 'lots': lotRecords.push(order === undefined ? { id, value: value as Lot | undefined } : { id, value: value as Lot | undefined, order }); break;
       }
     }
     if (lotRecords.length) this.lotStore.restore(lotRecords, 'restaurados');
@@ -2441,7 +2441,8 @@ export const LIST_KINDS: Readonly<Record<ListPart, DocChangeKind>> = {
 };
 /** What undo or redo puts back: records (undefined: none), stretches of lists (`splice`), values. */
 export interface Restoration {
-  readonly records: readonly { readonly part: RecordPart; readonly id: number; readonly value: unknown }[];
+  /** `order`: a lot's place in the lots' order, kept by a copy fed by the diary (`world/replica.ts`); absent, undo's own. */
+  readonly records: readonly { readonly part: RecordPart; readonly id: number; readonly value: unknown; readonly order?: number }[];
   readonly lists: readonly { readonly part: ListPart; readonly start: number; readonly remove: number; readonly items: readonly unknown[] }[];
   readonly values: readonly { readonly part: ValuePart; readonly value: unknown }[];
 }
