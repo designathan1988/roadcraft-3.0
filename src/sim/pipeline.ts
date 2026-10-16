@@ -17,6 +17,8 @@ import { runAudit } from './invariants';
 import { signalStateFor } from './signals/query';
 import { bodyClassOfArchetype } from './vehicles/archetypes';
 import { m } from '@world/units';
+import type { LaneletId } from '@world/lanelets';
+import { rebuildWork } from '@world/rebuildWork';
 
 export interface StepOptions {
   readonly traffic?: boolean;
@@ -124,7 +126,18 @@ export function rebindAgents(w: SimWorld): void {
 
 /** @rebuild The vehicle half of `rebindAgents`, after `SimWorld.rebuildVehicleTopology`. */
 export function rebindVehicles(w: SimWorld): void {
+  // DO NOT rebind every vehicle of the map for an edit: each one's route was planned again (5 s for 1,200 cars on a 24 x 24 grid).
+  const changes = w.topologyLog.since(w.vehiclesBound);
+  w.vehiclesBound = w.topologyLog.state;
+  let lanes: Set<LaneletId> | null = null;
+  if (changes !== null) {
+    lanes = new Set();
+    for (const change of changes) for (const id of change.lanelets) lanes.add(id);
+    if (lanes.size === 0) return;
+  }
   for (const v of w.vehiclesInIdOrder()) {
+    if (lanes && !boundTo(v, lanes)) continue;
+    rebuildWork.vehicles++;
     // A shadow is a projection onto a sibling lane that may have been rebuilt with a different length
     w.clearShadow(v);
     const lane = w.lanelet(v.lanelet);
@@ -154,6 +167,23 @@ export function rebindVehicles(w: SimWorld): void {
     v.claims = [...w.claims.points(v.id)];
     v.firstRequestTick = null;
   }
+}
+
+/** Whether a vehicle stands on, holds, or is bound through one of these lanes or movements. */
+function boundTo(v: Vehicle, lanes: ReadonlySet<LaneletId>): boolean {
+  if (lanes.has(v.lanelet) || (v.shadow && lanes.has(v.shadow.lanelet))) return true;
+  if (v.admittedConnector !== null && lanes.has(v.admittedConnector)) return true;
+  if (v.destination !== null && lanes.has(v.destination)) return true;
+  if (v.desiredLane !== null && lanes.has(v.desiredLane)) return true;
+  if (v.movementIntent !== null && lanes.has(v.movementIntent)) return true;
+  if (v.laneChange !== null && lanes.has(v.laneChange)) return true;
+  if (v.laneIntent !== null && lanes.has(v.laneIntent)) return true;
+  if ((v.commute && lanes.has(v.commute.lanelet)) || (v.kerbStop && lanes.has(v.kerbStop.lanelet))) return true;
+  for (const id of v.route) if (lanes.has(id)) return true;
+  for (const id of v.rearPath) if (lanes.has(id)) return true;
+  for (const id of v.reservedConnectors) if (lanes.has(id)) return true;
+  for (const token of v.clearingConnectors) if (lanes.has(token.connector)) return true;
+  return false;
 }
 
 /** @rebuild The pedestrian half of `rebindAgents`, after `SimWorld.rebuildWalkTopology`. */

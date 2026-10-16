@@ -263,6 +263,7 @@ export class SimWorld {
     // The kerbs and zebras of the old map
     this.sidewalks.clear();
     this.walkSeen = null;
+    this.vehiclesBound = null;
     this.signalPosts.reset();
     this.staleJunctions(null);
     this.occupied.clear();
@@ -557,6 +558,8 @@ export class SimWorld {
 
   /** What each build of the lane graph changed */
   readonly topologyLog = new ChangeLog<GraphChange>();
+  /** The lane graph's state the vehicles were last bound to (`rebindVehicles`); null: bind every one. */
+  vehiclesBound: object | null = null;
   /** The topology's state the kerbs, zebras and spans were brought up to (`walkTopologySteps`). */
   private walkSeen: object | null = null;
 
@@ -566,6 +569,8 @@ export class SimWorld {
     const prep = this.prepGraph;
     const changed = prep?.current(this.net) ? this.graph.adopt(prep, this.doc, this.net) : this.graph.update(this.doc, this.net);
     this.topologyLog.push(changed);
+    // No vehicle stands on the graph before this build: none is left to bind to it (`rebindVehicles`).
+    if (this.vehicles.size === 0) this.vehiclesBound = this.topologyLog.state;
     if (changed === null) this.conflicts.build(this.graph); else this.conflicts.update(this.graph, changed.junctions);
     this.claims.dropMissing(this.conflicts);
     this.syncControllers(changed?.junctions ?? null);
