@@ -530,7 +530,8 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     shapeBounds: () => shape.shapeBounds().map((b) => ({ minX: b.minX - p.cx, minY: b.minY - p.cy, maxX: b.maxX - p.cx, maxY: b.maxY - p.cy })),
   });
 
-  let lastPlate: Plate | null = null;
+  /** The regions the last `update` that moved the land rewrote, encoded by plate (`encode`), or null: whole plates. */
+  let lastRegions: readonly TerrainRegion[] | null = null;
   const geologyChanges = new GroundChanges();
   const geologySeen = new Map<Plate, number>();
   const sum = (read: (s: TerrainSurface) => number): number => {
@@ -626,14 +627,17 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     },
     update(doc, stroking) {
       sync(doc);
+      // DO NOT keep only the last plate's: a dab across a plate's edge moves the land of both.
       let moved = false;
+      let regions: TerrainRegion[] | null = [];
       for (const p of shownList) {
         if (!p.surface!.update(p.source, stroking)) continue;
         moved = true;
-        lastPlate = p;
+        const own = p.surface!.lastRegion;
+        regions = own && regions ? [...regions, ...own.map((r) => encode(p, r))] : null;
         measureTop(p);
       }
-      if (moved) measureHighest();
+      if (moved) { measureHighest(); lastRegions = regions; }
       return moved;
     },
     updatePaint(doc) {
@@ -664,10 +668,7 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       return box;
     },
     get waterRevision() { return sum((s) => s.waterRevision); },
-    get lastRegion() {
-      const region = lastPlate?.surface?.lastRegion ?? null;
-      return region && lastPlate ? encode(lastPlate, region) : null;
-    },
+    get lastRegion() { return lastRegions; },
     settle() { for (const p of shownList) p.surface!.settle(); },
     shapeToRoads(shape, region = null) {
       const list: readonly TerrainRegion[] | null = region === null ? null

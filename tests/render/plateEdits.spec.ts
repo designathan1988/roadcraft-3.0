@@ -153,5 +153,26 @@ describe('a plate edited by the brush', () => {
     // Its woods were worked out on the land without the stamps: not used.
     expect(made.woodsBase?.()).toBeNull();
   });
+
+  it('says where the land moved on every plate a dab across their edge reached', () => {
+    const doc = new RoadDoc();
+    const atlas = createFlatAtlas(1);
+    atlas.update(doc as never, false);
+    // A stamp on each of two plates side by side: both drawn in full.
+    doc.addTerrainStamp({ x: 300, y: 0, radius: 40, strength: 3, mode: 'raise' });
+    doc.addTerrainStamp({ x: 2 * TERRAIN_HALF - 300, y: 0, radius: 40, strength: 3, mode: 'raise' });
+    atlas.update(doc as never, false);
+    // Across the edge between them.
+    doc.addTerrainStamp({ x: TERRAIN_HALF, y: 0, radius: 50, strength: 6, mode: 'raise' });
+    expect(atlas.update(doc as never, false)).toBe(true);
+    const regions = atlas.lastRegion!;
+    expect(regions).toHaveLength(2);
+    const rects = regions.map((r) => atlas.rectOf(r));
+    // One each side of the edge, both round the dab.
+    expect(rects.filter((r) => (r[0] + r[2]) / 2 < TERRAIN_HALF)).toHaveLength(1);
+    expect(rects.filter((r) => (r[0] + r[2]) / 2 > TERRAIN_HALF)).toHaveLength(1);
+    for (const r of rects) expect(r[0] < TERRAIN_HALF + TERRAIN_CELL && r[2] > TERRAIN_HALF - TERRAIN_CELL).toBe(true);
+    for (const r of rects) expect(r[1] < 0 && r[3] > 0).toBe(true);
+  });
 });
 

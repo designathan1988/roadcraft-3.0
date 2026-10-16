@@ -159,8 +159,8 @@ export interface TerrainSurface {
   waterArea(): { minX: number; maxX: number; minY: number; maxY: number } | null;
   /** Moves whenever the water is rebuilt. */
   readonly waterRevision: number;
-  /** The grid cells (x0, x1, y0, y1) the last `update` rewrote, or null when it rewrote the whole plate */
-  readonly lastRegion: TerrainRegion | null;
+  /** The grid cells (x0, x1, y0, y1) the last `update` rewrote, one region a plate it moved, or null when it rewrote a whole plate */
+  readonly lastRegion: readonly TerrainRegion[] | null;
   /** After a stroke: what was deferred while it was held (the water) is brought up to date. */
   settle(): void;
   /** Cuts and fills the ground so it meets the roads. */
@@ -2506,7 +2506,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       }
       return digest.value();
     },
-    get lastRegion() { return lastRegion; },
+    get lastRegion() { return lastRegion && [lastRegion]; },
     settle() {
       if (!waterStale) return;
       waterStale = false;

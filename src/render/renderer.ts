@@ -2309,7 +2309,7 @@ export function createSceneRenderer(
         landVersion++;
         // The stroke's dirty region, dab by dab (`landDirty`).
         const moved = terrain.lastRegion;
-        landDirty = moved === null || landDirty === 'all' ? 'all' : unionRect(landDirty, regionRect(moved));
+        landDirty = moved === null || landDirty === 'all' ? 'all' : moved.reduce<Rect | null>((dirty, region) => unionRect(dirty, regionRect(region)), landDirty);
       }
       terrain.updatePaint(net.doc);
       // A brush stroke in progress: every dab used to re-solve the whole road network and re-mesh every road
