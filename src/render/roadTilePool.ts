@@ -1,5 +1,5 @@
 import type { Tile } from './mesh/tileMesh';
-import type { BlockArrays } from './mesh/roadLodPure';
+import { type BlockArrays, blockBuffers } from './mesh/roadLodPure';
 import type { TileRect } from './mesh/tileShape';
 import type { SurfaceData, TileMeshes } from './roadTileMesh';
 import type { PassDesc } from './roadSurfaceReads';
@@ -54,8 +54,7 @@ export class RoadTilePool implements RoadTiler {
     return new Promise((resolve, reject) => {
       lane.coarsening.set(id, { resolve, reject });
       lane.heard = performance.now();
-      lane.worker.postMessage({ id, coarse: { arrays, lock } },
-        [arrays.position.buffer, arrays.normal.buffer, arrays.uv.buffer, arrays.color.buffer, arrays.roadSection.buffer, arrays.index.buffer] as ArrayBuffer[]);
+      lane.worker.postMessage({ id, coarse: { arrays, lock } }, blockBuffers(arrays));
     });
   }
 

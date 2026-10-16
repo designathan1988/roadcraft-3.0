@@ -2,14 +2,30 @@ import { MeshoptSimplifier } from 'meshoptimizer';
 
 /** THE FAR LEVEL OF A BLOCK OF ROAD SURFACE, as arrays (`roadLod.ts` makes the mesh) */
 
-/** A block's arrays, as `tileArrays` makes them. */
+/** The per-vertex attributes past position, normal and uv that a surface's material reads: only those are built and uploaded. */
+export interface VertexReads {
+  /** `material.vertexColors`: the tint (`TileMeshOptions.tint`). */
+  readonly color: boolean;
+  /** The road's cross-section (`roadEdges.ts`, `TileMeshOptions.section`). */
+  readonly roadSection: boolean;
+}
+
+/** A block's arrays, as `tileArrays` makes them: `color` and `roadSection` only where its material reads them. */
 export interface BlockArrays extends Readonly<Record<string, ArrayLike<number>>> {
   readonly position: Float32Array;
   readonly normal: Float32Array;
   readonly uv: Float32Array;
-  readonly color: Float32Array;
-  readonly roadSection: Float32Array;
+  readonly color?: Float32Array;
+  readonly roadSection?: Float32Array;
   readonly index: Uint16Array | Uint32Array;
+}
+
+/** Every buffer of a block's arrays, to hand over (MDN, "Transferable objects"). */
+export function blockBuffers(arrays: BlockArrays): ArrayBuffer[] {
+  const out = [arrays.position.buffer, arrays.normal.buffer, arrays.uv.buffer, arrays.index.buffer] as ArrayBuffer[];
+  if (arrays.color) out.push(arrays.color.buffer as ArrayBuffer);
+  if (arrays.roadSection) out.push(arrays.roadSection.buffer as ArrayBuffer);
+  return out;
 }
 
 /** What a coarse block may deviate by from the block, metres (absolute: a 1 % error of a 250 m block is 2.5 m). */
@@ -33,9 +49,11 @@ export function coarseArrays(block: BlockArrays, lock: readonly [number, number,
   }
   // Normals and tints weigh in the error: a skirt's hard edge, a paint's colour are kept where they matter.
   const attributes = new Float32Array(count * 6);
+  // A block without `color` was untinted: white, as its tiles were written (`tileMesh.ts`).
+  const color = block.color;
   for (let i = 0; i < count; i++) {
     attributes[i * 6] = block.normal[i * 3]!; attributes[i * 6 + 1] = block.normal[i * 3 + 1]!; attributes[i * 6 + 2] = block.normal[i * 3 + 2]!;
-    attributes[i * 6 + 3] = block.color[i * 3]!; attributes[i * 6 + 4] = block.color[i * 3 + 1]!; attributes[i * 6 + 5] = block.color[i * 3 + 2]!;
+    attributes[i * 6 + 3] = color ? color[i * 3]! : 1; attributes[i * 6 + 4] = color ? color[i * 3 + 1]! : 1; attributes[i * 6 + 5] = color ? color[i * 3 + 2]! : 1;
   }
   const from = block.index instanceof Uint32Array ? block.index : Uint32Array.from(block.index);
   const target = Math.max(6, Math.floor((indices * COARSE_RATIO) / 3) * 3);
@@ -63,6 +81,9 @@ export function coarseArrays(block: BlockArrays, lock: readonly [number, number,
   };
   const index = used > 0xffff ? new Uint32Array(kept.length) : new Uint16Array(kept.length);
   for (let i = 0; i < kept.length; i++) index[i] = remap[kept[i]!]!;
-  return { position: take(block.position, 3), normal: take(block.normal, 3), uv: take(block.uv, 2), color: take(block.color, 3), roadSection: take(block.roadSection, 3), index };
+  return {
+    position: take(block.position, 3), normal: take(block.normal, 3), uv: take(block.uv, 2),
+    ...(block.color ? { color: take(block.color, 3) } : {}), ...(block.roadSection ? { roadSection: take(block.roadSection, 3) } : {}), index,
+  };
 }
 

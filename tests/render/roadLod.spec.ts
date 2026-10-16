@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { MeshBasicMaterial, type BufferAttribute, type Mesh } from 'three';
+import { MeshBasicMaterial, MeshStandardMaterial, type BufferAttribute, type Mesh } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import { coarseArrays } from '@render/mesh/roadLod';
-import { COARSE_ERROR } from '@render/mesh/roadLodPure';
+import { COARSE_ERROR, type VertexReads } from '@render/mesh/roadLodPure';
+import { applyRoadEdges, vertexReadsOf } from '@render/mesh/roadEdges';
 import { FAR_MARGIN, makeFar, makeNear, updateRoadLevels } from '@render/mesh/roadResidency';
 import { attachFarLevel, cloneBlock, mergeTiles } from '@render/mesh/surfaceTiles';
 import type { Tile } from '@render/mesh/tileMesh';
@@ -33,10 +34,12 @@ function strip(): Tile {
 const options = { name: 'asphalt', material: new MeshBasicMaterial(), receiveShadow: true } as const;
 // A road crossing its block from one side to the other: only its two ends lie on the block's edge.
 const lock = [0, -60, W, H + 60] as const;
+/** A material that reads the tint and the cross-section, as the asphalt's does (`materials.ts`). */
+const ALL: VertexReads = { color: true, roadSection: true };
 /** The block with its far level made as a worker makes it (`roadTile.worker.ts`): the arrays copied, simplified, handed back. */
-const make = (near: boolean): Mesh => mergeTiles([strip()], options, () => [strip()], {
+const make = (near: boolean, reads = ALL): Mesh => mergeTiles([strip()], options, reads, () => [strip()], {
   lock, near,
-  start: (block, arrays) => { const made = coarseArrays(cloneBlock(arrays), lock); if (made) attachFarLevel(block, made, options, () => [strip()], lock, near); },
+  start: (block, arrays) => { const made = coarseArrays(cloneBlock(arrays), lock); if (made) attachFarLevel(block, made, options, reads, () => [strip()], lock, near); },
 })!;
 const levels = (mesh: Mesh): { coarse: Mesh; full: boolean } => mesh.userData.lod as { coarse: Mesh; full: boolean };
 const trianglesOf = (mesh: Mesh): number => (mesh.geometry.index?.count ?? 0) / 3;
@@ -68,6 +71,26 @@ describe('a block of road with a far level', () => {
     const heights = (m: Mesh): number[] => { const p = m.geometry.getAttribute('position') as BufferAttribute; return Array.from({ length: p.count }, (_, i) => p.getY(i)); };
     const spread = (h: number[]): number => Math.max(...h) - Math.min(...h);
     expect(spread(heights(coarse))).toBeLessThanOrEqual(spread(heights(mesh)) + COARSE_ERROR);
+  });
+
+  it('uploads only the attributes its material reads, on both levels, and is simplified the same without them', () => {
+    const none = make(true, { color: false, roadSection: false });
+    const all = make(true);
+    for (const level of [none, levels(none).coarse]) {
+      expect(level.geometry.getAttribute('color')).toBeUndefined();
+      expect(level.geometry.getAttribute('roadSection')).toBeUndefined();
+    }
+    for (const level of [all, levels(all).coarse]) {
+      expect(level.geometry.getAttribute('color')).toBeDefined();
+      expect(level.geometry.getAttribute('roadSection')).toBeDefined();
+    }
+    // An unread tint was white: the far level is the one the full arrays give.
+    expect(Array.from(levels(none).coarse.geometry.index!.array)).toEqual(Array.from(levels(all).coarse.geometry.index!.array));
+    // The reads are the material's own: its vertex colours, and the road edges' shader.
+    const asphalt = new MeshStandardMaterial({ vertexColors: true });
+    applyRoadEdges(asphalt, 'carriageway');
+    expect(vertexReadsOf(asphalt)).toEqual(ALL);
+    expect(vertexReadsOf(new MeshStandardMaterial())).toEqual({ color: false, roadSection: false });
   });
 
   it('made near shows its own mesh and hides the far one', () => {
