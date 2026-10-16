@@ -21,6 +21,7 @@ import {
   RepeatWrapping,
   SRGBColorSpace,
   Sphere,
+  Box3,
   Vector3,
   type Material,
   type Object3D,
@@ -42,11 +43,13 @@ import type { ChangeJournal } from '@world/changes';
 import { MAP_HALF, PLATE_SIZE } from '@world/bounds';
 import {
   MAX_TERRAIN_STAMPS,
+  RELIEF_LEGACY,
   RIVER_BED_FLOOR,
   TERRAIN_WATER_HEIGHT,
   TerrainIndex,
   sampleTerrainHeight,
   terrainInfluence,
+  type ReliefVersion,
   type TerrainStamp,
 } from '@world/terrain';
 import { bakeSurface, fbm, makeNoise, type SurfaceBake, type SurfaceRecipe } from './mesh/textureBaker';
@@ -107,7 +110,7 @@ export interface TerrainSurface {
   readonly ground: Mesh;
   /** Where the sun is (a direction towards it, three's axes) */
   setSun(direction: { readonly x: number; readonly y: number; readonly z: number }): void;
-  /** Once a frame, after `focus`: the map's far woods (`flatAtlas.ts`, `farForest.ts`). */
+  /** Once a frame, after `focus` and before the frame is drawn: the painted ground written since the last one sent, the map's far woods (`flatAtlas.ts`, `farForest.ts`). */
   bakeRelief(renderer: WebGLRenderer, focus: { readonly x: number; readonly z: number } | null): void;
   /** How the rivers and lakes look and move: waves, foam, current (`render/water.ts` WaterLook). */
   setWaterLook(look: WaterLook): void;
@@ -153,8 +156,8 @@ export interface TerrainSurface {
   waterArea(): { minX: number; maxX: number; minY: number; maxY: number } | null;
   /** Moves whenever the water is rebuilt. */
   readonly waterRevision: number;
-  /** The grid cells (x0, x1, y0, y1) the last `update` rewrote, or null when it rewrote the whole plate */
-  readonly lastRegion: TerrainRegion | null;
+  /** The grid cells (x0, x1, y0, y1) the last `update` rewrote, one region a plate it moved, or null when it rewrote a whole plate */
+  readonly lastRegion: readonly TerrainRegion[] | null;
   /** After a stroke: what was deferred while it was held (the water) is brought up to date. */
   settle(): void;
   /** Cuts and fills the ground so it meets the roads. */
@@ -554,18 +557,28 @@ function shoreLevels(water: BufferGeometry, levels: Float32Array, ground: ArrayL
   }
 }
 
-/** The ground texture the terrain shader reads per corner: R the water's level */
-function packGroundCorners(texture: DataTexture, levels: Float32Array, flowers: Float32Array, scrub: Float32Array, forest: Float32Array, sand: Float32Array, basalt: Float32Array): void {
+/** The ground texture the terrain shader reads per corner: R the water's level; `box`: only those corners (null: all). */
+function packGroundCorners(texture: DataTexture, levels: Float32Array, flowers: Float32Array, scrub: Float32Array, forest: Float32Array, sand: Float32Array, basalt: Float32Array, box: CornerRect | null = null): void {
   const data = texture.image.data as Float32Array;
   const byte = (value: number): number => Math.round(Math.min(1, Math.max(0, value)) * 255);
-  for (let k = 0; k < levels.length; k++) {
-    data[k * 4] = levels[k] as number;
-    // Two bytes to a channel, exact in a float: the flowers (the scrub) low, the painted sandstone (basalt) high.
-    data[k * 4 + 1] = byte(flowers[k] as number) + 256 * byte(sand[k] as number);
-    data[k * 4 + 2] = byte(scrub[k] as number) + 256 * byte(basalt[k] as number);
-    data[k * 4 + 3] = forest[k] as number;
+  const { x0, x1, y0, y1 } = box ?? { x0: 0, x1: GRID - 1, y0: 0, y1: GRID - 1 };
+  for (let iy = y0; iy <= y1; iy++) {
+    for (let k = iy * GRID + x0; k <= iy * GRID + x1; k++) {
+      data[k * 4] = levels[k] as number;
+      // Two bytes to a channel, exact in a float: the flowers (the scrub) low, the painted sandstone (basalt) high.
+      data[k * 4 + 1] = byte(flowers[k] as number) + 256 * byte(sand[k] as number);
+      data[k * 4 + 2] = byte(scrub[k] as number) + 256 * byte(basalt[k] as number);
+      data[k * 4 + 3] = forest[k] as number;
+    }
   }
-  texture.needsUpdate = true;
+}
+
+/** The corners (inclusive) within a disc of the plate's map, a corner round, on its grid; rows run from +y downwards. */
+function discCorners(x: number, y: number, radius: number): CornerRect {
+  return {
+    x0: Math.max(0, Math.floor((x - radius + TERRAIN_HALF) / TERRAIN_CELL) - 1), x1: Math.min(GRID - 1, Math.ceil((x + radius + TERRAIN_HALF) / TERRAIN_CELL) + 1),
+    y0: Math.max(0, Math.floor((TERRAIN_HALF - (y + radius)) / TERRAIN_CELL) - 1), y1: Math.min(GRID - 1, Math.ceil((TERRAIN_HALF - (y - radius)) / TERRAIN_CELL) + 1),
+  };
 }
 
 /** Lays one geology dab on the terrain's corners: within its radius the rock moves towards the dab's */
@@ -690,8 +703,8 @@ function paintLayer(texture: DataArrayTexture, layer: number): Uint8Array {
   return (texture.image.data as Uint8Array).subarray(layer * size, (layer + 1) * size);
 }
 
-/** Lays one dab into the weight textures: within its radius every layer moves toward the dab's */
-function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): void {
+/** Lays one dab into the weight textures: within its radius every layer moves toward the dab's; returns the texels it may have written. */
+function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): CornerRect {
   const a = layers[0]!;
   const b = layers[1]!;
   // Rocks lie on bare ground: they lay the soil layer part way.
@@ -718,6 +731,7 @@ function rasterPaint(layers: readonly Uint8Array[], dab: PaintDab): void {
       }
     }
   }
+  return { x0, x1, y0, y1 };
 }
 
 /** Side of the forest density grid over the plate (7.8 m a cell). */
@@ -783,6 +797,7 @@ function terrainMaterial(
   shore.minFilter = NearestFilter;
   shore.generateMipmaps = false;
   packGroundCorners(shore, shoreLevelData, flowerCornerData, scrubCornerData, forestCornerData, sandCornerData, basaltCornerData);
+  shore.needsUpdate = true;
   material.userData['shore'] = shore;
   material.userData['sandCorners'] = sandCornerData;
   material.userData['basaltCorners'] = basaltCornerData;
@@ -1652,7 +1667,15 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
   water.visible = false;
 
   let index = new TerrainIndex([], 0);
+  /** The land without the rivers (`rebuildWater`: the level a river's channel was cut into), kept with `index`. */
+  let landIndex = new TerrainIndex([], 0);
   let revision = -1;
+  /** @rebuild The plate's stamps indexed whole: its first build, the land under them changed, a list changed otherwise than at its end. */
+  const indexAll = (doc: TerrainSource): void => {
+    index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
+    landIndex = new TerrainIndex([], revision, index.relief, index.ground);
+    for (const stamp of index.stamps) if (stamp.mode !== 'river') landIndex.add(stamp, revision);
+  };
 
   /** The land the player sculpted, with no road in it. */
   const naturalHeightAt = (x: number, y: number): number =>
@@ -2067,8 +2090,6 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
 
   const rebuildWater = (stamps: readonly TerrainStamp[]): void => {
     // A river stands at the level its channel was cut INTO, below the banks
-    const land = stamps.filter((stamp) => stamp.mode !== 'river');
-    const landIndex = new TerrainIndex(land, 0, index.relief, index.ground);
     const landAt = (x: number, y: number): number => TERRAIN_BASE + sampleTerrainHeight(landIndex, x, y);
 
     // A river drawn as a stroke is ONE body of water along its course
@@ -2118,7 +2139,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     water.geometry = unifiedWaterGeometry(discs, renderedHeightAt, floodCells, ribbons);
     previous.dispose();
     shoreLevels(water.geometry, material.userData['shoreLevels'] as Float32Array, grid);
-    packGroundCorners(material.userData['shore'] as DataTexture, material.userData['shoreLevels'] as Float32Array, material.userData['flowerCorners'] as Float32Array, material.userData['scrubCorners'] as Float32Array, material.userData['forestCorners'] as Float32Array, material.userData['sandCorners'] as Float32Array, material.userData['basaltCorners'] as Float32Array);
+    packShore(null);
     water.geometry.computeBoundingBox();
     const box = water.geometry.boundingBox;
     // In world (x, y): the mesh is three's (x, height, -y).
@@ -2204,9 +2225,48 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     paint = [paintLayer(next, 0), paintLayer(next, 1)];
     lightLayer = paintLayer(next, LIGHT_LAYER);
     small.dispose();
+    // The new array goes whole when first drawn.
+    paintDirty = null;
+    lightDirty = null;
   };
   paintArray.addLayerUpdate(LIGHT_LAYER);
   paintArray.needsUpdate = true;
+  /** DO NOT send a whole layer of the painted ground (4 MB) for a dab: the texels written since the last frame, a box of layers 0-1 and one of the light's. */
+  let paintDirty: CornerRect | null = null;
+  let lightDirty: CornerRect | null = null;
+  /** The array's own data as a texture never drawn, so `copyTextureToTexture` sends a box of it from the page (three.js r186). */
+  let paintSource: DataTexture | null = null;
+  const paintRegion = new Box3();
+  const paintAt = new Vector3();
+  /** The boxes written since the last frame, sent before it is drawn (`bakeRelief`). */
+  const sendPaint = (renderer: WebGLRenderer): void => {
+    if (!paintDirty && !lightDirty) return;
+    if (paintSource?.image.data !== paintArray.image.data) paintSource = new DataTexture(paintArray.image.data, paintRes, paintRes, RGBAFormat, UnsignedByteType);
+    for (const [box, z0, z1] of [[paintDirty, 0, 1], [lightDirty, LIGHT_LAYER, LIGHT_LAYER]] as const) {
+      if (!box) continue;
+      paintRegion.min.set(box.x0, box.y0, z0);
+      paintRegion.max.set(box.x1 + 1, box.y1 + 1, z1 + 1);
+      renderer.copyTextureToTexture(paintSource, paintArray, paintRegion, paintAt.set(box.x0, box.y0, z0));
+    }
+    paintDirty = null;
+    lightDirty = null;
+  };
+  /** The ground texture of the corners (`packGroundCorners`): waiting to go whole (made, or packed whole) until three.js sent it */
+  const shore = material.userData['shore'] as DataTexture;
+  let shoreWhole = true;
+  shore.onUpdate = () => { shoreWhole = false; };
+  const packShore = (box: CornerRect | null): void => {
+    packGroundCorners(shore, material.userData['shoreLevels'] as Float32Array, material.userData['flowerCorners'] as Float32Array, material.userData['scrubCorners'] as Float32Array,
+      material.userData['forestCorners'] as Float32Array, material.userData['sandCorners'] as Float32Array, material.userData['basaltCorners'] as Float32Array, box);
+    shore.needsUpdate = true;
+    if (box && !shoreWhole && shore.updateRanges.length + box.y1 - box.y0 + 1 <= GRID) {
+      // Row by row: three.js r186 sends a texture's ranges a row at a time (`WebGLTextures.updateTexture`, RGBA only).
+      for (let iy = box.y0; iy <= box.y1; iy++) shore.addUpdateRange((iy * GRID + box.x0) * 4, (box.x1 - box.x0 + 1) * 4);
+      return;
+    }
+    shore.clearUpdateRanges();
+    shoreWhole = true;
+  };
   // The corners whose heights moved since the light was last asked for
   let landMoved: CornerRect | 'all' | null = 'all';
   const markLand = (rect: CornerRect | 'all'): void => {
@@ -2228,8 +2288,8 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       const row = (iy - rect.y0) * width * 4;
       lightLayer.set(rgba.subarray(row, row + width * 4), (iy * paintRes + rect.x0) * 4);
     }
-    paintArray.addLayerUpdate(LIGHT_LAYER);
-    paintArray.needsUpdate = true;
+    // Sent as a box before the next frame (`sendPaint`); the light layer's texels are its corners.
+    lightDirty = lightDirty ? unionCorners(lightDirty, rect) : rect;
     performance.measure('hitch:terrain-light', { start: startedAt, end: performance.now() });
     performance.measure('terrain-light/worker', { start: startedAt - result.ms, end: startedAt, detail: `${width}x${rect.y1 - rect.y0 + 1} corners` });
     // Rows run from +y downwards.
@@ -2292,11 +2352,15 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     // Whether a dab of ground or cover was laid: the plants follow those, and a dab of geology changes neither.
     let covered = false;
     const geologyRects: (readonly [number, number, number, number])[] = [];
+    /** The corners the dabs laid can have changed (their covers, their rock), or null for none. */
+    let changed: CornerRect | null = null;
+    const touch = (box: CornerRect): void => { changed = changed ? unionCorners(changed, box) : box; };
     // Something to lay: the array at its full size first.
     if (dabs.length > 0) growPaint();
     const lay = (dab: PaintDab): void => {
       if (isGeologyKind(dab.kind)) {
         geologyRects.push(rasterGeology(sandCorners, basaltCorners, dab));
+        touch(discCorners(dab.x, dab.y, dab.radius));
         ecologyAll();
         return;
       }
@@ -2306,12 +2370,16 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         ecologyAll();
         return;
       }
-      rasterPaint(paint, dab);
+      const texels = rasterPaint(paint, dab);
+      paintDirty = paintDirty ? unionCorners(paintDirty, texels) : texels;
       rasterCover(covers, dab);
+      // A corner reads the cover cell it stands in (`coverAt`): the cells the dab wrote, two cells round.
+      touch(discCorners(dab.x, dab.y, dab.radius + 2 * (TERRAIN_SIZE / FOREST_RES)));
       covered = true;
     };
     // Dabs only added since the last time: lay just those.
-    if (dabs.length >= paintCount && dabs[0] === paintFirst && paintCount > 0) {
+    const added = dabs.length >= paintCount && dabs[0] === paintFirst && paintCount > 0;
+    if (added) {
       for (let i = paintCount; i < dabs.length; i++) lay(dabs[i]!);
       if (geologyRects.length > 0) geologyChanges.mark(geologyRects);
     } else {
@@ -2328,29 +2396,30 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     }
     paintCount = dabs.length;
     paintFirst = dabs[0];
-    if (!covered) {
-      packGroundCorners(material.userData['shore'] as DataTexture, material.userData['shoreLevels'] as Float32Array, material.userData['flowerCorners'] as Float32Array, material.userData['scrubCorners'] as Float32Array, material.userData['forestCorners'] as Float32Array, sandCorners, basaltCorners);
-      return;
-    }
-    forestRevision++;
-    paintArray.addLayerUpdate(0);
-    paintArray.addLayerUpdate(1);
-    paintArray.needsUpdate = true;
-    {
-      // The flowers and the scrub at each terrain corner, into the shader's ground texture.
+    // Laid again whole: the corners and the painted layers all go.
+    const box: CornerRect | null = added ? changed : { x0: 0, x1: GRID - 1, y0: 0, y1: GRID - 1 };
+    if (covered) {
+      forestRevision++;
+      if (!added) {
+        paintArray.addLayerUpdate(0);
+        paintArray.addLayerUpdate(1);
+        paintArray.needsUpdate = true;
+        paintDirty = null;
+      }
+      // The flowers and the scrub at each corner the dabs reach, into the shader's ground texture.
       const flowers = material.userData['flowerCorners'] as Float32Array;
       const scrub = material.userData['scrubCorners'] as Float32Array;
       const forest = material.userData['forestCorners'] as Float32Array;
-      for (let iy = 0; iy < GRID; iy++) {
-        for (let ix = 0; ix < GRID; ix++) {
+      for (let iy = box!.y0; iy <= box!.y1; iy++) {
+        for (let ix = box!.x0; ix <= box!.x1; ix++) {
           const x = -TERRAIN_HALF + ix * TERRAIN_CELL, y = TERRAIN_HALF - iy * TERRAIN_CELL;
           flowers[iy * GRID + ix] = coverAt('flowers', x, y);
           scrub[iy * GRID + ix] = coverAt('scrub', x, y);
           forest[iy * GRID + ix] = coverAt('forest', x, y);
         }
       }
-      packGroundCorners(material.userData['shore'] as DataTexture, material.userData['shoreLevels'] as Float32Array, flowers, scrub, forest, sandCorners, basaltCorners);
     }
+    if (box) packShore(added ? box : null);
   };
 
   const parts: TerrainPart[] = [];
@@ -2374,7 +2443,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
     ground,
     setSun,
     setWaterLook(look) { waterSurface.setLook(look); },
-    bakeRelief() {},
+    bakeRelief(renderer) { sendPaint(renderer); },
     vergeMaterial,
     updatePaint,
     get ecologyPending() { return ecologyStale && !waterStale; },
@@ -2434,7 +2503,7 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       }
       return digest.value();
     },
-    get lastRegion() { return lastRegion; },
+    get lastRegion() { return lastRegion && [lastRegion]; },
     settle() {
       if (!waterStale) return;
       waterStale = false;
@@ -2472,31 +2541,22 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
       diary = doc.changes;
       if (revision === doc.terrainRevision) return false;
       const firstBuild = revision < 0;
-      const previous = index;
-      const before = revision;
       revision = doc.terrainRevision;
-      index = new TerrainIndex(doc.terrainStamps, revision, doc.terrainRelief, doc.terrainGround);
-
-      // Only the cells a new stamp reaches are rewritten.
-      const added = doc.terrainStamps.length === previous.stamps.length + 1
-        ? doc.terrainStamps[doc.terrainStamps.length - 1]
-        : undefined;
-      // The first stamp of a map with none
-      const sameHistory = added !== undefined && stampAppended(previous.stamps, doc.terrainStamps, doc.changes.since(before, ['terrain']));
-
-      // The first build worked out off the page (`plateMesh.ts`, as Cesium builds its terrain meshes in a worker)
-      const made = firstBuild && prebuilt && doc.terrainStamps.length === 0 ? prebuilt : null;
+      // The first build worked out off the page (`plateMesh.ts`, as Cesium builds its terrain meshes in a worker): the land before any stamp.
+      const made = firstBuild ? prebuilt : null;
       prebuilt = null;
-      // The woods' base holds only on the land it was worked out on.
-      woods = made?.woods ?? null;
+      // The woods' base holds only on the land it was worked out on: no stamp on it.
+      woods = made && doc.terrainStamps.length === 0 ? made.woods ?? null : null;
       if (made) {
+        // DO NOT throw it away for the plate's stamps: they are laid on it below, box by box, as the brush lays them.
+        index = new TerrainIndex([], revision, doc.terrainRelief, doc.terrainGround);
+        landIndex = new TerrainIndex([], revision, index.relief, index.ground);
         const pos = position.array as Float32Array;
         const h = made.heights;
         for (let i = 0; i < GRID * GRID; i++) pos[i * 3 + 1] = h[i]!;
         grid.set(h);
         natural.set(h);
         naturalFlip.set(made.flip);
-        lastRegion = null;
         markAll(position as BufferAttribute);
         retriangulate(0, GRID - 1, 0, GRID - 1);
         (normal.array as Float32Array).set(made.normals);
@@ -2504,50 +2564,57 @@ export function createTerrainSurface(anisotropy: number, origin: { readonly x: n
         steep.set(made.steep);
         markAll(steepAttribute);
         geometry.boundingSphere = new Sphere(new Vector3(0, (made.low + made.high) / 2, 0), Math.hypot(TERRAIN_HALF * Math.SQRT2, (made.high - made.low) / 2));
-        lastStamps = doc.terrainStamps;
-        if (stroking) { waterStale = true; markWaterDirty(null); } else { waterStale = false; waterDirty = null; rebuildWater(lastStamps); }
-        markLand('all');
-        return true;
       }
+      // The stamps the brush added at the end, or an undo took from it, over the same land (relief and ground): the land moved by them alone.
+      const tail = firstBuild && !made ? null : stampTail(index, doc.terrainStamps, doc.terrainRelief ?? RELIEF_LEGACY, doc.terrainGround);
+      if (!made && tail && tail.removed.length === 0 && tail.added.length === 0) return false;
+      // Their boxes (corners) and how many corners: past a whole plate's worth, the whole plate is rewritten once.
+      const boxes = tail ? [...tail.removed, ...tail.added].map(stampCorners) : null;
+      const changed = boxes && boxes.reduce((sum, b) => sum + (b[1] - b[0] + 1) * (b[3] - b[2] + 1), 0) <= GRID * GRID ? boxes : null;
+      if (tail) {
+        // DO NOT index every stamp again for the few the brush laid or an undo took: the index changes at its end, as the list did.
+        for (let k = tail.removed.length - 1; k >= 0; k--) {
+          index.pop(revision);
+          if (tail.removed[k]!.mode !== 'river') landIndex.pop(revision);
+        }
+        for (const stamp of tail.added) {
+          index.add(stamp, revision);
+          if (stamp.mode !== 'river') landIndex.add(stamp, revision);
+        }
+      } else indexAll(doc);
 
+      // Only the cells the stamps added or taken reach are rewritten, each stamp's box with every stamp over it.
       let box: readonly [number, number, number, number] | null = null;
-      if (firstBuild || !added || !sameHistory) {
+      if (!changed) {
         rewrite(0, GRID - 1, 0, GRID - 1);
-        lastRegion = null;
+        markAll(position as BufferAttribute);
+        retriangulate(0, GRID - 1, 0, GRID - 1);
+        wholePlateMoved();
       } else {
-        const reach = added.radius + TERRAIN_CELL;
-        const cx0 = Math.max(0, Math.floor((added.x - reach + TERRAIN_HALF) / TERRAIN_CELL));
-        const cx1 = Math.min(GRID - 1, Math.ceil((added.x + reach + TERRAIN_HALF) / TERRAIN_CELL));
-        const cy0 = Math.max(0, Math.floor((TERRAIN_HALF - (added.y + reach)) / TERRAIN_CELL));
-        const cy1 = Math.min(GRID - 1, Math.ceil((TERRAIN_HALF - (added.y - reach)) / TERRAIN_CELL));
-        // A `flatten` stamp scales everything under it
-        rewrite(cx0, cx1, cy0, cy1);
-        box = [cx0, cx1, cy0, cy1];
-        lastRegion = box;
-      }
-
-      if (box) markBox(position as BufferAttribute, 3, GRID, box[0], box[1], box[2], box[3]);
-      else markAll(position as BufferAttribute);
-      if (box) retriangulate(box[0], Math.min(GRID - 1, box[1] + 1), box[2], Math.min(GRID - 1, box[3] + 1));
-      else retriangulate(0, GRID - 1, 0, GRID - 1);
-      if (box) {
-        // Only the corners the dab rewrote can have tilted, with their ring of neighbours
         const moved: number[] = [];
-        for (let iy = box[2]; iy <= box[3]; iy++) {
-          for (let ix = box[0]; ix <= box[1]; ix++) moved.push(iy * GRID + ix);
+        for (const [cx0, cx1, cy0, cy1] of changed) {
+          // A `flatten` stamp scales everything under it
+          rewrite(cx0, cx1, cy0, cy1);
+          markBox(position as BufferAttribute, 3, GRID, cx0, cx1, cy0, cy1);
+          retriangulate(cx0, Math.min(GRID - 1, cx1 + 1), cy0, Math.min(GRID - 1, cy1 + 1));
+          // Only the corners the dab rewrote can have tilted, with their ring of neighbours
+          for (let iy = cy0; iy <= cy1; iy++) for (let ix = cx0; ix <= cx1; ix++) moved.push(iy * GRID + ix);
+          box = box ? [Math.min(box[0], cx0), Math.max(box[1], cx1), Math.min(box[2], cy0), Math.max(box[3], cy1)] : [cx0, cx1, cy0, cy1];
         }
         refreshNormals(moved);
-        // The bounds grown over the corners the dab moved (`Sphere.expandByPoint`), as the shaping pass does
+        // The bounds grown over the corners the dabs moved (`Sphere.expandByPoint`), as the shaping pass does
         const sphere = geometry.boundingSphere!;
-        const position = geometry.getAttribute('position');
         for (const i of moved) sphere.expandByPoint(spherePoint.fromBufferAttribute(position, i));
-      } else wholePlateMoved();
-      lastStamps = doc.terrainStamps;
+      }
+      // A plate made now is new everywhere.
+      if (firstBuild) box = null;
+      lastRegion = box;
+      lastStamps = index.stamps;
       // The water - every pool and river on the map - is the deferred part of a stroke
       if (stroking) {
         waterStale = true;
         // A river dab makes water; any other dab is its box.
-        markWaterDirty(added && added.mode !== 'river' ? box : null);
+        markWaterDirty(tail && box && !tail.removed.some((s) => s.mode === 'river') && !tail.added.some((s) => s.mode === 'river') ? box : null);
       } else { waterStale = false; waterDirty = null; rebuildWater(lastStamps); }
       markLand(box ? { x0: box[0], x1: box[1], y0: box[2], y1: box[3] } : 'all');
       return true;
@@ -2940,9 +3007,22 @@ function pushWetTriangle(
   }
 }
 
-/** Whether the land changed by one stamp added to the stamps it had */
-export function stampAppended(previous: readonly unknown[], now: readonly unknown[], entries: readonly { readonly rects: unknown }[] | null): boolean {
-  if (now.length !== previous.length + 1) return false;
-  if (previous.length > 0) return previous[0] === now[0];
-  return entries !== null && entries.length > 0 && entries.every((c) => c.rects !== null);
+/** The corners (x0, x1, y0, y1, inclusive) a stamp can move, a cell round its disc, on a plate's grid. */
+function stampCorners(stamp: TerrainStamp): readonly [number, number, number, number] {
+  const reach = stamp.radius + TERRAIN_CELL;
+  return [
+    Math.max(0, Math.floor((stamp.x - reach + TERRAIN_HALF) / TERRAIN_CELL)), Math.min(GRID - 1, Math.ceil((stamp.x + reach + TERRAIN_HALF) / TERRAIN_CELL)),
+    Math.max(0, Math.floor((TERRAIN_HALF - (stamp.y + reach)) / TERRAIN_CELL)), Math.min(GRID - 1, Math.ceil((TERRAIN_HALF - (stamp.y - reach)) / TERRAIN_CELL)),
+  ];
+}
+
+/** How `now` differs from the stamps `index` holds at its end only (the brush adding, an undo taking), over the same land (relief and ground); null otherwise. */
+export function stampTail(index: TerrainIndex, now: readonly TerrainStamp[], relief: ReliefVersion, ground: ((x: number, y: number) => number) | undefined):
+  { readonly removed: readonly TerrainStamp[]; readonly added: readonly TerrainStamp[] } | null {
+  const had = index.stamps;
+  if (index.relief !== relief || index.ground !== ground) return null;
+  // The part both hold: the shorter list, the same at its first and last stamp (the lists only ever grow and shrink at their end).
+  const kept = Math.min(had.length, now.length);
+  if (kept > 0 && (now[0] !== had[0] || now[kept - 1] !== had[kept - 1])) return null;
+  return { removed: had.slice(kept), added: now.slice(kept) };
 }

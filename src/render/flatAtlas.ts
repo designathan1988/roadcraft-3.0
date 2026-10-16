@@ -46,15 +46,15 @@ const CONTENT_KINDS: readonly ChangeKind[] = ['roads', 'buildings', 'lots', 'uti
 
 class PlateSource implements TerrainSource {
   changes!: RoadDoc['changes'];
+  /** The plate's own count of its stamps' changes (`TerrainSource.terrainRevision`), moved only when they did. */
   terrainRevision = 0;
   terrainStamps: TerrainStamp[] = [];
   terrainRelief!: RoadDoc['terrainRelief'];
   natureRevision = 0;
   nature: RoadDoc['nature'] = null;
+  /** The plate's own count of its dabs' changes, moved only when they did. */
   paintRevision = 0;
   terrainPaint: PaintDab[] = [];
-  stampSources: readonly TerrainStamp[] = [];
-  paintSources: readonly PaintDab[] = [];
   terrainGround?: (x: number, y: number) => number;
 }
 
@@ -78,8 +78,96 @@ interface Plate {
 
 const sameList = (a: readonly unknown[], b: readonly unknown[]): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
 /** Whether a disc reaches a plate (its square grown by the disc). */
-const reaches = (p: Plate, x: number, y: number, radius: number): boolean =>
+const reaches = (p: { readonly cx: number; readonly cy: number }, x: number, y: number, radius: number): boolean =>
   Math.abs(x - p.cx) <= TERRAIN_HALF + radius && Math.abs(y - p.cy) <= TERRAIN_HALF + radius;
+
+/** A brush's disc on the map (a stamp of the land, a dab of paint), world coordinates. */
+interface Disc { readonly x: number; readonly y: number; readonly radius: number; readonly ox?: number; readonly oy?: number }
+
+/** DO NOT filter the map's every stamp (dab) for every plate at each change: stamps times plates for one dab of the brush */
+export class PlateShares<T extends Disc> {
+  /** Each plate's items, the document's own, in the document's order. */
+  readonly sources: T[][];
+  /** The same items moved to each plate's own map (about its centre): the plate's surface reads these. */
+  readonly locals: T[][];
+  /** Each item's copy on each plate, made once (null: it does not reach the plate). */
+  private readonly copies: WeakMap<T, T | null>[];
+  /** The document's list as last shared out: its first and last item and its length (`appended`). */
+  private first: T | undefined;
+  private last: T | undefined;
+  private count = 0;
+  private readonly side: number;
+  private readonly mid: number;
+
+  /** `plates`: the map's plates, row by row from the south-west (`MAP_REGIONS`). */
+  constructor(private readonly plates: readonly { readonly cx: number; readonly cy: number }[]) {
+    this.sources = plates.map(() => []);
+    this.locals = plates.map(() => []);
+    this.copies = plates.map(() => new WeakMap());
+    this.side = Math.round(Math.sqrt(plates.length));
+    this.mid = (this.side - 1) / 2;
+  }
+
+  /** Brings every plate's lists up to `list` (`all`: each plate's taken again); returns the plates whose lists changed. */
+  update(list: readonly T[], all: boolean): number[] {
+    const added = all ? null : this.appended(list);
+    this.first = list[0];
+    this.last = list[list.length - 1];
+    this.count = list.length;
+    if (added) {
+      // Only the plates the new items reach take them, at the end of their lists, in place.
+      const reached = new Set<number>();
+      for (const item of added) {
+        this.reached(item, (i) => {
+          reached.add(i);
+          this.sources[i]!.push(item);
+          this.locals[i]!.push(this.copyOn(i, item)!);
+        });
+      }
+      return [...reached];
+    }
+    const moved: number[] = [];
+    // @rebuild Every item shared out again (a load, an undo, a clear): each to the plates it reaches; a plate whose list is the same keeps it.
+    const lists = this.plates.map((): T[] => []);
+    for (const item of list) this.reached(item, (i) => { lists[i]!.push(item); });
+    lists.forEach((next, i) => {
+      if (!all && sameList(next, this.sources[i]!)) return;
+      this.sources[i] = next;
+      this.locals[i] = next.map((item) => this.copyOn(i, item)!);
+      moved.push(i);
+    });
+    return moved;
+  }
+
+  /** The items added at the end of `list` since it was last shared out (the brush laying them), or null when it changed otherwise. */
+  private appended(list: readonly T[]): readonly T[] | null {
+    if (this.count === 0 || list.length < this.count || list[0] !== this.first || list[this.count - 1] !== this.last) return null;
+    return list.slice(this.count);
+  }
+
+  /** The plates a disc reaches (`reaches`), found from its box. */
+  private reached(item: T, visit: (plate: number) => void): void {
+    const { side, mid } = this;
+    const i0 = Math.max(0, Math.floor((item.x - item.radius - TERRAIN_HALF) / PLATE_SIZE) + mid);
+    const i1 = Math.min(side - 1, Math.ceil((item.x + item.radius + TERRAIN_HALF) / PLATE_SIZE) + mid);
+    const j0 = Math.max(0, Math.floor((item.y - item.radius - TERRAIN_HALF) / PLATE_SIZE) + mid);
+    const j1 = Math.min(side - 1, Math.ceil((item.y + item.radius + TERRAIN_HALF) / PLATE_SIZE) + mid);
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (reaches(this.plates[j * side + i]!, item.x, item.y, item.radius)) visit(j * side + i);
+  }
+
+  /** An item on plate `i`, about its centre (null when it does not reach it); the same copy each time. */
+  private copyOn(i: number, item: T): T | null {
+    const copies = this.copies[i]!;
+    let local = copies.get(item);
+    if (local === undefined) {
+      const p = this.plates[i]!;
+      copies.set(item, local = reaches(p, item.x, item.y, item.radius)
+        ? { ...item, x: item.x - p.cx, y: item.y - p.cy, ...(item.ox !== undefined && item.oy !== undefined ? { ox: item.ox - p.cx, oy: item.oy - p.cy } : {}) }
+        : null);
+    }
+    return local;
+  }
+}
 
 /** The map's far ground: a coarse patch of `FAR_QUADS` x `FAR_QUADS` quads per plate, in world coordinates */
 const FAR_QUADS = 32;
@@ -306,7 +394,6 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     measureHighest();
   };
 
-  let contentKey = '';
   /** DO NOT walk every node, building, lot, pole, plant and wall of the map at each change */
   const contentCursor = new JournalCursor(CONTENT_KINDS);
   const plateCountOf = (rect: ChangeRect, into: Set<number>): void => {
@@ -315,11 +402,8 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     for (let kx = kx0; kx <= kx1; kx++) for (let ky = ky0; ky <= ky1; ky++) into.add(plateOf(kx * PLATE_SIZE, ky * PLATE_SIZE));
   };
   const readContent = (doc: TerrainSource): boolean => {
-    const d = doc as Partial<RoadDoc>;
-    const key = [d.revision, d.buildings?.revision, d.lotRevision, d.utilityRevision, d.treeRevision, doc.terrainRevision, doc.paintRevision].join(':');
-    if (key === contentKey) return false;
-    contentKey = key;
     const entries = contentCursor.read(doc.changes);
+    if (entries && entries.length === 0) return false;
     if (entries && entries.every((e) => e.rects !== null)) {
       // Marked in place: the plates the changes reach (a stamp or paint has its rects too).
       const before = content.size;
@@ -347,22 +431,12 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
   };
 
   // The document's stamps and dabs on each plate they reach, moved to its map (about its centre).
-  const stampCopies = plates.map(() => new WeakMap<TerrainStamp, TerrainStamp | null>());
-  const dabCopies = plates.map(() => new WeakMap<PaintDab, PaintDab | null>());
-  const copyOn = <T extends { readonly x: number; readonly y: number; readonly radius: number; readonly ox?: number; readonly oy?: number }>(copies: WeakMap<T, T | null>, p: Plate, item: T): T | null => {
-    let local = copies.get(item);
-    if (local === undefined) {
-      copies.set(item, local = reaches(p, item.x, item.y, item.radius)
-        ? { ...item, x: item.x - p.cx, y: item.y - p.cy, ...(item.ox !== undefined && item.oy !== undefined ? { ox: item.ox - p.cx, oy: item.oy - p.cy } : {}) }
-        : null);
-    }
-    return local;
-  };
-  let seenTerrain = -1;
-  /** DO NOT filter the map's every stamp for every plate at each change: stamps times plates for one dab of the brush. */
+  const stampShares = new PlateShares<TerrainStamp>(MAP_REGIONS);
+  const dabShares = new PlateShares<PaintDab>(MAP_REGIONS);
+  /** The diary of the land and of the paint: what moved since the last share (`sync`). */
   const terrainCursor = new JournalCursor(['terrain']);
+  const paintCursor = new JournalCursor(['paint']);
   let seenRelief: ReliefVersion | null = null;
-  let seenPaint = -1;
   /** The map's own land before any stamp, world coordinates (`reliefHeight`). */
   let bare: (x: number, y: number) => number = () => 0;
   const sync = (doc: TerrainSource): void => {
@@ -373,43 +447,34 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       p.source.nature = doc.nature;
     }
     if (doc.terrainRelief !== undefined) farForest.book.sync(doc.terrainRelief, doc.nature, focusX, focusY);
-    if (doc.terrainRevision !== seenTerrain) {
-      seenTerrain = doc.terrainRevision;
-      const relief = doc.terrainRelief;
-      const reliefMoved = seenRelief !== relief;
+    const relief = doc.terrainRelief;
+    const reliefMoved = seenRelief !== relief;
+    const land = terrainCursor.read(doc.changes);
+    if (reliefMoved || land === null || land.length > 0) {
       seenRelief = relief;
-      if (reliefMoved) bare = (x, y) => reliefHeight(relief, x, y);
-      buildFar(relief);
-      const entries = terrainCursor.read(doc.changes);
-      const rects = entries && entries.every((e) => e.rects !== null) ? entries.flatMap((e) => e.rects!) : null;
-      plates.forEach((p, i) => {
-        // A plate no change reached keeps its stamps as they were (the relief moved: every plate).
-        if (!reliefMoved && rects && p.source.terrainRevision !== 0
-          && !rects.some((r) => reaches(p, (r[0] + r[2]) / 2, (r[1] + r[3]) / 2, Math.hypot(r[2] - r[0], r[3] - r[1]) / 2))) return;
-        const copies = stampCopies[i]!;
-        const sources = doc.terrainStamps.filter((s) => copyOn(copies, p, s) !== null);
-        p.source.terrainRelief = relief;
-        if (reliefMoved || !p.source.terrainGround) {
-          if (reliefMoved) { p.heights = null; p.mesh = null; p.asked = false; }
+      if (reliefMoved) {
+        bare = (x, y) => reliefHeight(relief, x, y);
+        buildFar(relief);
+        for (const p of plates) {
+          p.source.terrainRelief = relief;
+          p.heights = null; p.mesh = null; p.asked = false;
           // Read over the plate's own corners (off the page), not the field again at each.
           p.source.terrainGround = (lx, ly) => groundOn(p, lx, ly);
         }
-        if (!reliefMoved && p.source.terrainRevision !== 0 && sameList(sources, p.source.stampSources)) return;
-        p.source.stampSources = sources;
-        p.source.terrainStamps = sources.map((s) => copies.get(s) as TerrainStamp);
-        p.source.terrainRevision = doc.terrainRevision;
-      });
+      }
+      for (const i of stampShares.update(doc.terrainStamps, reliefMoved)) {
+        const p = plates[i]!;
+        p.source.terrainStamps = stampShares.locals[i]!;
+        p.source.terrainRevision++;
+      }
     }
-    if (doc.paintRevision !== seenPaint) {
-      seenPaint = doc.paintRevision;
-      plates.forEach((p, i) => {
-        const copies = dabCopies[i]!;
-        const sources = doc.terrainPaint.filter((d) => copyOn(copies, p, d) !== null);
-        if (sameList(sources, p.source.paintSources)) return;
-        p.source.paintSources = sources;
-        p.source.terrainPaint = sources.map((d) => copies.get(d) as PaintDab);
-        p.source.paintRevision = doc.paintRevision;
-      });
+    const paint = paintCursor.read(doc.changes);
+    if (paint === null || paint.length > 0) {
+      for (const i of dabShares.update(doc.terrainPaint, false)) {
+        const p = plates[i]!;
+        p.source.terrainPaint = dabShares.locals[i]!;
+        p.source.paintRevision++;
+      }
     }
     if (readContent(doc)) refresh();
   };
@@ -465,7 +530,8 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     shapeBounds: () => shape.shapeBounds().map((b) => ({ minX: b.minX - p.cx, minY: b.minY - p.cy, maxX: b.maxX - p.cx, maxY: b.maxY - p.cy })),
   });
 
-  let lastPlate: Plate | null = null;
+  /** The regions the last `update` that moved the land rewrote, encoded by plate (`encode`), or null: whole plates. */
+  let lastRegions: readonly TerrainRegion[] | null = null;
   const geologyChanges = new GroundChanges();
   const geologySeen = new Map<Plate, number>();
   const sum = (read: (s: TerrainSurface) => number): number => {
@@ -527,7 +593,9 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       for (const p of shownList) p.surface!.setSun(direction);
       farSurface.setSun(direction);
     },
-    bakeRelief(renderer: WebGLRenderer) {
+    bakeRelief(renderer: WebGLRenderer, focus) {
+      // Each made plate's painted ground written since the last frame, sent before this one is drawn.
+      for (const p of plates) p.surface?.bakeRelief(renderer, focus);
       // The far woods: each plate's fade from whether it is in full and its own trees can grow.
       const now = performance.now() / 1000;
       for (const p of plates) farForest.book.setFull(p.index, p.shown, p.surface?.ecology() != null, now);
@@ -556,14 +624,17 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
     },
     update(doc, stroking) {
       sync(doc);
+      // DO NOT keep only the last plate's: a dab across a plate's edge moves the land of both.
       let moved = false;
+      let regions: TerrainRegion[] | null = [];
       for (const p of shownList) {
         if (!p.surface!.update(p.source, stroking)) continue;
         moved = true;
-        lastPlate = p;
+        const own = p.surface!.lastRegion;
+        regions = own && regions ? [...regions, ...own.map((r) => encode(p, r))] : null;
         measureTop(p);
       }
-      if (moved) measureHighest();
+      if (moved) { measureHighest(); lastRegions = regions; }
       return moved;
     },
     updatePaint(doc) {
@@ -594,10 +665,7 @@ export function createFlatAtlas(anisotropy: number): TerrainSurface {
       return box;
     },
     get waterRevision() { return sum((s) => s.waterRevision); },
-    get lastRegion() {
-      const region = lastPlate?.surface?.lastRegion ?? null;
-      return region && lastPlate ? encode(lastPlate, region) : null;
-    },
+    get lastRegion() { return lastRegions; },
     settle() { for (const p of shownList) p.surface!.settle(); },
     shapeToRoads(shape, region = null) {
       const list: readonly TerrainRegion[] | null = region === null ? null

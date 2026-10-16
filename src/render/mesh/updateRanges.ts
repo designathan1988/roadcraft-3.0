@@ -3,9 +3,10 @@ import type { BufferAttribute } from 'three';
 /** Most update ranges one attribute keeps waiting for a draw; past it the whole array goes (a plate nobody draws is edited again and again). */
 const MAX_RANGES = 128;
 
-/** The whole attribute marked changed, any ranges waiting dropped (three.js sends ranges only, when there are any). */
+/** The whole attribute marked changed AS A RANGE: a box marked after it, before the draw, would otherwise send only its rows (three.js sends ranges only, when there are any). */
 export function markAll(attribute: BufferAttribute): void {
   attribute.clearUpdateRanges();
+  attribute.addUpdateRange(0, attribute.array.length);
   attribute.needsUpdate = true;
 }
 

@@ -4,15 +4,15 @@ import {
 } from 'three';
 import type { Vec2 } from '@core/vec2';
 import type { ChangeJournal, ChangeKind, ChangeRect } from '@world/changes';
+import { JournalCursor } from '@world/derived';
 import { MAP_HALF } from '@world/bounds';
 import {
   DASH, GAP, FLAG_BUTT, FLAG_DASHED, FLAG_LEVEL, FLAG_FILL, FLAG_INSIDE, FLAG_STROKE, LOT_CELL, LotLattice, TEXTURE_WIDTH, TILE_CELLS, type LatticeShape,
 } from './lotLattice';
 
 /** DO NOT go back to geometry laid on the ground per lot */
-export interface LotOverlayInput {
-  /** Changes whenever anything drawn changes. */
-  readonly key: string;
+export interface LotPart {
+  /** `order`: each shape's place in the drawing, later over earlier (`LatticeShape.order`). */
   readonly polygons: readonly {
     readonly corners: readonly Vec2[];
     readonly fill: number | null;
@@ -23,9 +23,20 @@ export interface LotOverlayInput {
     readonly width: number;
     /** A lot with a building: its yard's paving and paths - the building's own parts, not the ground - are coloured too */
     readonly built?: boolean;
+    readonly order: number;
   }[];
-  readonly lines: readonly { readonly a: Vec2; readonly b: Vec2; readonly colour: number; readonly dashed: boolean; readonly width: number }[];
-  readonly points: readonly { readonly p: Vec2; readonly colour: number; readonly radius: number }[];
+  readonly lines: readonly { readonly a: Vec2; readonly b: Vec2; readonly colour: number; readonly dashed: boolean; readonly width: number; readonly order: number }[];
+  readonly points: readonly { readonly p: Vec2; readonly colour: number; readonly radius: number; readonly order: number }[];
+}
+
+/** DO NOT hand the overlay every lot again for one that changed: what it draws, in parts by id, and which parts changed when */
+export interface LotOverlayInput {
+  /** Every part drawn by id (a lot, a proposed lot, the gesture); a part is a new object whenever what it draws changed. */
+  readonly parts: ReadonlyMap<string, LotPart>;
+  /** The serial of the latest change of the parts. */
+  readonly serial: number;
+  /** The ids of the parts put, replaced or taken away after `serial`, or null when it cannot say (read them all). */
+  changedSince(serial: number): readonly string[] | null;
 }
 
 /** A colour (0xRRGGBB, sRGB) and an alpha as the lattice keeps them: RGBA8, red lowest. */
@@ -209,49 +220,34 @@ export function applyLotOverlay(material: Material, key: string, options: { read
   material.customProgramCacheKey = () => `${previousKey()}-lots-${key}`;
 }
 
-/** What one shape of the input is, its key: the same key, the same shape. */
-type Keyed = { key: string; make(order: number): LatticeShape };
-
-/** The input's shapes, keyed, in drawing order: the polygons, then the lines, then the dots. */
-function shapesOf(input: LotOverlayInput, levelOf: (where: string, points: readonly Vec2[]) => number): Keyed[] {
-  const out: Keyed[] = [];
-  for (const poly of input.polygons) {
+/** A part's shapes (`LotPart`) as the lattice draws them, and the points their ground levels were read at. */
+function shapesOf(part: LotPart, levelAt: (x: number, y: number) => number, read: Vec2[]): LatticeShape[] {
+  const out: LatticeShape[] = [];
+  /** A shape's ground level: the ground at its points' mean (a built lot's: under its building, its pad). */
+  const level = (points: readonly Vec2[]): number => {
+    let x = 0, y = 0;
+    for (const q of points) { x += q.x; y += q.y; }
+    read.push({ x: x / points.length, y: y / points.length });
+    return levelAt(x / points.length, y / points.length);
+  };
+  for (const poly of part.polygons) {
     const ring = poly.corners;
     if (ring.length < 3) continue;
     const fill = poly.fill === null ? 0 : rgba(poly.fill, poly.fillAlpha);
     const line = rgba(poly.line, poly.lineAlpha);
     if (!fill && !line) continue;
-    const where = ring.map((q) => `${q.x},${q.y}`).join(';');
-    const level = poly.built ? levelOf(where, ring) : undefined;
-    out.push({
-      key: `p|${fill}|${line}|${poly.width}|${level ?? ''}|${where}`,
-      make: (order) => {
-        const edges = new Float64Array(ring.length * 4);
-        ring.forEach((q, i) => { const r = ring[(i + 1) % ring.length]!; edges.set([q.x, q.y, r.x, r.y], i * 4); });
-        return { edges, fill, line, halfWidth: poly.width / 2, dashed: false, butt: false, order, ...(level === undefined ? {} : { level }) };
-      },
-    });
+    const edges = new Float64Array(ring.length * 4);
+    ring.forEach((q, i) => { const r = ring[(i + 1) % ring.length]!; edges.set([q.x, q.y, r.x, r.y], i * 4); });
+    out.push({ edges, fill, line, halfWidth: poly.width / 2, dashed: false, butt: false, order: poly.order, ...(poly.built ? { level: level(ring) } : {}) });
   }
-  for (const l of input.lines) {
+  for (const l of part.lines) {
     // A line of no length drew nothing as a ribbon, and draws nothing here.
     if (l.a.x === l.b.x && l.a.y === l.b.y) continue;
-    const line = rgba(l.colour, 1);
     // A line or a dot is drawn over a yard's paving too (a lot's front, its arrow)
-    const where = `${l.a.x},${l.a.y};${l.b.x},${l.b.y}`;
-    const level = levelOf(where, [l.a, l.b]);
-    out.push({
-      key: `l|${line}|${l.width}|${l.dashed ? 1 : 0}|${level}|${where}`,
-      make: (order) => ({ edges: Float64Array.of(l.a.x, l.a.y, l.b.x, l.b.y), fill: 0, line, halfWidth: l.width / 2, dashed: l.dashed, butt: true, order, level }),
-    });
+    out.push({ edges: Float64Array.of(l.a.x, l.a.y, l.b.x, l.b.y), fill: 0, line: rgba(l.colour, 1), halfWidth: l.width / 2, dashed: l.dashed, butt: true, order: l.order, level: level([l.a, l.b]) });
   }
-  for (const d of input.points) {
-    const line = rgba(d.colour, 1);
-    const where = `${d.p.x},${d.p.y}`;
-    const level = levelOf(where, [d.p]);
-    out.push({
-      key: `o|${line}|${d.radius}|${level}|${where}`,
-      make: (order) => ({ edges: Float64Array.of(d.p.x, d.p.y, d.p.x, d.p.y), fill: 0, line, halfWidth: d.radius, dashed: false, butt: false, order, level }),
-    });
+  for (const d of part.points) {
+    out.push({ edges: Float64Array.of(d.p.x, d.p.y, d.p.x, d.p.y), fill: 0, line: rgba(d.colour, 1), halfWidth: d.radius, dashed: false, butt: false, order: d.order, level: level([d.p]) });
   }
   return out;
 }
@@ -259,62 +255,62 @@ function shapesOf(input: LotOverlayInput, levelOf: (where: string, points: reado
 /** What moves the ground a built lot's level is read from (`surfaceHeightAt`): its level is read again there. */
 const GROUND_KINDS: readonly ChangeKind[] = ['terrain', 'roads', 'ground', 'elevation', 'surfaces'];
 
-/** `groundAt`: the ground's height (`surfaceHeightAt`), read once for each built lot, at its middle. */
+/** `groundAt`: the ground's height (`surfaceHeightAt`), read once for each shape with a level, at its middle, when its part is drawn. */
 export function createLotOverlay(groundAt: (x: number, y: number) => number = () => 0) {
   const lattice = new LotLattice(MAP_HALF);
   let texture: DataTexture | null = null;
-  let key = '';
-  /** The shapes in the lattice by key (a list: the same shape twice is two). */
-  let held = new Map<string, LatticeShape[]>();
-  /** The diary's serial the levels were read at. */
-  let groundSeen = -1;
-  /** The ground levels read, by where the shape is: each read once, not on every pointer move of the Zoning tool */
-  const levels = new Map<string, number>();
-  /** The levels read, by the lattice cell of the point they were read at: those a ground change reaches, found by place. */
+  /** The parts in the lattice by id: the part drawn, its shapes, and the lattice cells its levels were read in. */
+  const held = new Map<string, { readonly part: LotPart; readonly shapes: readonly LatticeShape[]; readonly cells: readonly number[] }>();
+  /** The parts whose levels were read in a lattice cell: those a ground change reaches, found by place. */
   const levelsByCell = new Map<number, Set<string>>();
+  /** The input last drawn and the serial of its parts it was drawn at (`LotOverlayInput.changedSince`). */
+  let source: LotOverlayInput | null = null;
+  let seen = -1;
+  /** The diary of what moves the ground the levels were read from. */
+  const groundCursor = new JournalCursor(GROUND_KINDS);
   const cellOf = (x: number, y: number): number =>
     Math.floor((y + MAP_HALF) / LOT_CELL) * lattice.cellsPerSide + Math.floor((x + MAP_HALF) / LOT_CELL);
-  /** A shape's ground level: the ground at its points' mean (a built lot's: under its building, its pad), to the centimetre. */
-  const levelOf = (where: string, points: readonly Vec2[]): number => {
-    const known = levels.get(where);
-    if (known !== undefined) return known;
-    let x = 0, y = 0;
-    for (const q of points) { x += q.x; y += q.y; }
-    x /= points.length; y /= points.length;
-    const level = Math.round(groundAt(x, y) * 100) / 100;
-    levels.set(where, level);
-    const cell = cellOf(x, y);
-    let set = levelsByCell.get(cell);
-    if (!set) levelsByCell.set(cell, set = new Set());
-    set.add(where);
-    return level;
-  };
-  /** The levels read where the ground moved, forgotten (all, with no rectangles); true when any was. */
-  const forgetLevels = (entries: readonly { readonly rects: readonly ChangeRect[] | null }[] | null): boolean => {
-    if (levels.size === 0) return false;
-    if (entries === null || entries.some((e) => e.rects === null)) {
-      levels.clear();
-      levelsByCell.clear();
-      return true;
+  /** The ground's level at a point, to the centimetre. */
+  const levelAt = (x: number, y: number): number => Math.round(groundAt(x, y) * 100) / 100;
+  const make = (id: string, part: LotPart): void => {
+    const read: Vec2[] = [];
+    const shapes = shapesOf(part, levelAt, read);
+    for (const shape of shapes) lattice.add(shape);
+    const cells = [...new Set(read.map((q) => cellOf(q.x, q.y)))];
+    for (const cell of cells) {
+      let set = levelsByCell.get(cell);
+      if (!set) levelsByCell.set(cell, set = new Set());
+      set.add(id);
     }
-    let forgot = false;
+    held.set(id, { part, shapes, cells });
+  };
+  const drop = (id: string): void => {
+    const was = held.get(id);
+    if (!was) return;
+    for (const shape of was.shapes) lattice.remove(shape);
+    for (const cell of was.cells) {
+      const set = levelsByCell.get(cell);
+      set?.delete(id);
+      if (set?.size === 0) levelsByCell.delete(cell);
+    }
+    held.delete(id);
+  };
+  /** The parts whose levels were read where the ground moved (all of them, with no rectangles). */
+  const onMovedGround = (entries: readonly { readonly rects: readonly ChangeRect[] | null }[] | null): Set<string> => {
+    const out = new Set<string>();
+    if (entries === null || entries.some((e) => e.rects === null)) {
+      for (const ids of levelsByCell.values()) for (const id of ids) out.add(id);
+      return out;
+    }
+    const n = lattice.cellsPerSide;
     for (const { rects } of entries) {
       for (const [x0, y0, x1, y1] of rects!) {
-        const n = lattice.cellsPerSide;
         const cx0 = Math.max(0, Math.floor((x0 + MAP_HALF) / LOT_CELL)), cx1 = Math.min(n - 1, Math.floor((x1 + MAP_HALF) / LOT_CELL));
         const cy0 = Math.max(0, Math.floor((y0 + MAP_HALF) / LOT_CELL)), cy1 = Math.min(n - 1, Math.floor((y1 + MAP_HALF) / LOT_CELL));
-        for (let cy = cy0; cy <= cy1; cy++) {
-          for (let cx = cx0; cx <= cx1; cx++) {
-            const set = levelsByCell.get(cy * n + cx);
-            if (!set) continue;
-            for (const where of set) levels.delete(where);
-            levelsByCell.delete(cy * n + cx);
-            forgot = true;
-          }
-        }
+        for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) for (const id of levelsByCell.get(cy * n + cx) ?? []) out.add(id);
       }
     }
-    return forgot;
+    return out;
   };
 
   /** The lattice's writes sent to its texture: in place, or a texture of the new size. */
@@ -343,37 +339,46 @@ export function createLotOverlay(groundAt: (x: number, y: number) => number = ()
   return {
     /** The lattice: for the tests, the work an edit cost. */
     lattice,
-    /** Draws `input` (null: no lots) into the ground from the next frame. */
+    /** Draws `input` (null: no lots) into the ground from the next frame: the parts it says changed, and those whose ground moved. */
     set(input: LotOverlayInput | null, changes?: ChangeJournal): void {
-      let moved = false;
-      if (changes && changes.version !== groundSeen) {
-        const entries = groundSeen < 0 ? null : changes.since(groundSeen, GROUND_KINDS);
-        groundSeen = changes.version;
-        moved = forgetLevels(entries);
-      }
-      const next = input?.key ?? '';
-      if (next === key && !moved) return;
-      key = next;
+      const regrade = changes ? onMovedGround(groundCursor.read(changes)) : new Set<string>();
       if (!input) {
+        if (source === null && held.size === 0) return;
+        source = null;
+        seen = -1;
         lattice.clear();
-        held = new Map();
+        held.clear();
+        levelsByCell.clear();
         UNIFORMS.uLotsGrid.value.w = 0;
         upload();
         return;
       }
-      const shapes = shapesOf(input, levelOf);
-      const kept = new Map<string, LatticeShape[]>();
-      shapes.forEach((s, order) => {
-        const old = held.get(s.key);
-        let shape = old?.pop();
-        if (shape) shape.order = order;
-        else { shape = s.make(order); lattice.add(shape); }
-        let list = kept.get(s.key);
-        if (!list) kept.set(s.key, list = []);
-        list.push(shape);
-      });
-      for (const list of held.values()) for (const shape of list) lattice.remove(shape);
-      held = kept;
+      const ids = source === input ? input.changedSince(seen) : null;
+      source = input;
+      seen = input.serial;
+      let moved = false;
+      if (ids === null) {
+        // Every part read: those gone or replaced taken away, the rest kept as drawn.
+        for (const [id, was] of [...held]) if (input.parts.get(id) !== was.part) { drop(id); moved = true; }
+        for (const [id, part] of input.parts) if (!held.has(id)) { make(id, part); moved = true; }
+      } else {
+        for (const id of ids) {
+          const part = input.parts.get(id);
+          if (held.get(id)?.part === part) continue;
+          drop(id);
+          if (part) make(id, part);
+          moved = true;
+        }
+      }
+      // The levels read again where the ground moved: those parts drawn again.
+      for (const id of regrade) {
+        const was = held.get(id);
+        if (!was) continue;
+        drop(id);
+        make(id, was.part);
+        moved = true;
+      }
+      if (!moved) return;
       lattice.flush();
       UNIFORMS.uLotsGrid.value.w = lattice.size > 0 ? 1 : 0;
       upload();
