@@ -5,12 +5,11 @@ import type { Era } from '@world/buildings/architecture';
 import { METERS_PER_UNIT } from '@world/units';
 import { driveSide as driveSideOf, furnishLot, garageRamp, lotKind, planLot, yardRamp } from './lotPlan';
 import { MAX_ELEMENTS, type Building, type BuildingElement, type Volume } from '@world/buildings/types';
-import type { SiteContext } from '@world/buildings/validate';
+import { type SiteContext, validateBuilding } from '@world/buildings/validate';
 import type { RoadDoc } from '@world/doc';
 import { m, stepsIn } from '@world/units';
 import type { ZoneDensity } from '@world/zones';
-import { lotBuildFrame, lotCentre } from '@world/lots';
-import { addBuildingRecord, type placeBuilding } from './buildings';
+import { lotBuildFrame, lotCentre, type Lot } from '@world/lots';
 import { MIN_SIZE, buildingBounds, footprintRects, storedBounds } from '@world/buildings/geometry';
 import { intersection } from '@core/clipper';
 import { pointInPolygon } from '@core/polygon';
@@ -23,10 +22,12 @@ import { garageUnder, stepToSlope } from '@world/buildings/splitLevel';
 
 const BOUNDARY_PARTS = new Set(['wall', 'fence', 'hedge', 'railing']);
 
-/** A grown building added, its boundary meeting the neighbours' */
-function addPlaced(ctx: SiteContext, record: Omit<Building, 'id'>): ReturnType<typeof placeBuilding> {
-  const first = addBuildingRecord(ctx, record);
-  if (first.ok || first.problem !== 'building') return first;
+/** A grown building as it may stand (its id the next the store hands out), its boundary meeting the neighbours'; null when it may not */
+function fitPlaced(ctx: SiteContext, record: Omit<Building, 'id'>): Building | null {
+  const first = { ...record, id: ctx.doc.buildings.nextId } as Building;
+  const problem = validateBuilding(ctx, first);
+  if (!problem) return first;
+  if (problem !== 'building') return null;
   const probe = { ...record, id: -1 } as unknown as Building;
   const box = buildingBounds(probe, m(2));
   const theirs: Vec2[][] = [];
@@ -41,8 +42,9 @@ function addPlaced(ctx: SiteContext, record: Omit<Building, 'id'>): ReturnType<t
     const ring = groundElements({ ...probe, elements: [e] }, -m(0.05))[0];
     return !ring || !theirs.some((c) => overlapArea(ring, c) > AREA_EPS);
   });
-  if (elements.length === (record.elements ?? []).length) return first;
-  return addBuildingRecord(ctx, { ...record, elements });
+  if (elements.length === (record.elements ?? []).length) return null;
+  const second = { ...record, elements, id: ctx.doc.buildings.nextId } as Building;
+  return validateBuilding(ctx, second) ? null : second;
 }
 
 /** The joint left between two neighbouring lots: a hair, so their party walls meet without overlapping. */
@@ -156,8 +158,41 @@ function quarterOf(anchor: Vec2, n: Vec2): { character: number; era: Era } {
   return { character, era };
 }
 
-/** @perItem Runs once a building grown (`growSlice`, the 500 ms growth): nothing it reaches may walk the map. */
+/** What a lot grows (`planOnLot`): the building that fits it, its id the next the store hands out; null, nothing fits (the lot set aside). */
+export interface LotGrowth {
+  readonly lot: Lot;
+  readonly building: Building | null;
+}
+
+/** What the growth stamps on a building it stores: when it was built, its wear, the lot generator's version. */
+export interface GrowthStamp {
+  readonly builtAt: number;
+  readonly decay: number;
+  readonly lotPlan: number;
+}
+
+/** @perItem Grows one building on a zoned lot without one (`growOnLot`): the plan and its store at once; the building's id, or null. */
 export function growOnLot(ctx: SiteContext, refused: Set<number>, seed: number): number | null {
+  const growth = planOnLot(ctx, refused, seed);
+  return growth ? commitGrowth(ctx, growth, refused)?.id ?? null : null;
+}
+
+/** A lot's growth carried out (`planOnLot`): its building stored (the stamp laid over it), its lot naming it; or the lot set aside. */
+export function commitGrowth(ctx: SiteContext, growth: LotGrowth, refused: Set<number>, stamp?: GrowthStamp): Building | null {
+  const open = ctx.doc.openLots;
+  if (!growth.building) {
+    open.refuse(growth.lot, refused);
+    return null;
+  }
+  if (growth.building.id !== ctx.doc.buildings.nextId) throw new Error(`a growth planned for building ${growth.building.id} stored as ${ctx.doc.buildings.nextId}`);
+  const stored = ctx.doc.buildings.add(stamp ? { ...growth.building, ...stamp } : growth.building);
+  const where = rectAround(growth.lot.corners);
+  open.grew(growth.lot, stored.id as number, where ? [where] : null, 'building grew on the lot');
+  return stored;
+}
+
+/** @perItem The growth of the next open lot worked out, nothing written (`commitGrowth` writes it): nothing it reaches may walk the map. */
+export function planOnLot(ctx: SiteContext, refused: Set<number>, seed: number): LotGrowth | null {
   const { doc } = ctx;
   // The open lots kept by the document (`world/openLots.ts`)
   const open = doc.openLots;
@@ -272,22 +307,18 @@ export function growOnLot(ctx: SiteContext, refused: Set<number>, seed: number):
     if (bare) reachStreet(body, t.front, lotW);
     fitToLot(body, ring);
     const placed = (): Omit<Building, 'id'> => ({ ...body, x: anchor.x, y: anchor.y, rotation: frame.rotation }) as Omit<Building, 'id'>;
-    let result = addPlaced(ctx, placed());
-    if ((!result.ok || result.id === undefined) && bare) {
+    let building = fitPlaced(ctx, placed());
+    if (!building && bare) {
       // Refused with it (over a curved footway, a neighbour's yard): the plan alone, as before.
       body.volumes = bare.volumes;
       if (bare.elements) body.elements = bare.elements;
       else delete body.elements;
       fitToLot(body, ring);
-      result = addPlaced(ctx, placed());
+      building = fitPlaced(ctx, placed());
     }
-    if (!result.ok || result.id === undefined) continue;
-    const where = rectAround(lot.corners);
-    open.grew(lot, result.id as number, where ? [where] : null, 'building grew on the lot');
-    return result.id as number;
+    if (building) return { lot, building };
   }
-  open.refuse(lot, refused);
-  return null;
+  return { lot, building: null };
 }
 
 
