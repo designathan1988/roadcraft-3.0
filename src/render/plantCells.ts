@@ -1,9 +1,9 @@
-import { Color, type Frustum, Group, Matrix4 } from 'three';
+import { Color, type Frustum, Group, type InstancedMesh, Matrix4 } from 'three';
 import { keepCellKey, keepCellOf } from './candidateKeep';
 import { m } from '@world/units';
 
 import { COVER_STANCE, FOREST_SPECIES, coverMatrixInto, coverVariant, rockTint, scrubTint, treeTint, type CoverPlacement, type GroundCoverKit, type TreePlacement } from './groundCover';
-import { createInstanceRuns, RunBuilder, type Run, type RunStore } from './instanceRuns';
+import { createInstanceRuns, RunBuilder, warmMeshes, type Run, type RunStore } from './instanceRuns';
 import { TREE_MODELS, type NatureTreeKit, standsAmong, treeColourInto, treeMatrixInto, varietyOf } from './natureTrees';
 
 /** How far off the view a tree (up to 19 m tall) and a stone or bush still throw a shadow into it, low sun. */
@@ -18,6 +18,8 @@ export interface PlantCells {
   cull(frustum: Frustum, view: Matrix4): void;
   /** The map zoom: the leaf cards left out (`InstanceRuns.setMap`). */
   setMap(map: boolean): void;
+  /** One mesh of each store, one instance each: what compiles the layer's programs ahead (`warmMeshes`). */
+  warm(): InstancedMesh[];
   dispose(): void;
 }
 
@@ -53,6 +55,7 @@ function plantLayer(name: string, stores: readonly RunStore[], runOf: (cell: num
     },
     cull(frustum, view) { runs.cull(frustum, view); },
     setMap(map) { runs.setMap(map); },
+    warm: () => warmMeshes(stores),
     dispose() { runs.dispose(); drawn.clear(); },
   };
 }

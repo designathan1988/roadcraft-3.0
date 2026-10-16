@@ -1,10 +1,4 @@
-import {
-  BufferGeometry,
-  InstancedBufferAttribute,
-  InstancedMesh,
-  MeshStandardMaterial,
-  type MeshDepthMaterial,
-} from 'three';
+import { BufferGeometry, MeshStandardMaterial, type MeshDepthMaterial } from 'three';
 import type { TreePlacement } from './groundCover';
 import { leafCardMaterials, lowPolyTreeParts } from './lowPolyTrees';
 import { applyWind, windDepthMaterial, type WindResponse } from './wind';
@@ -21,8 +15,6 @@ export function seedOfKind(kind: TreeModelKind, r: number): number {
   const slot = slots[Math.min(slots.length - 1, Math.floor(r * slots.length))]!;
   return (slot + 0.05 + ((r * 7.31) % 1) * 0.9) / TREE_MODELS.length;
 }
-/** How far the view moves before the trees are sorted again (one level now: kept for the API). */
-const LOD_SLACK = m(24);
 /** Neighbours within this reach (18 m) make a tree's stand. */
 const STAND_REACH = m(18);
 
@@ -74,32 +66,11 @@ export async function loadNatureTrees(_anisotropy: number): Promise<NatureTreeKi
   };
 }
 
-export interface NatureForest {
-  readonly meshes: readonly InstancedMesh[];
-  /** Takes these trees in place of the ones it holds, written into the meshes it already has */
-  update(trees: readonly TreePlacement[]): boolean;
-  /** Writes the trees into their meshes when the camera has moved (one level: the same model at every distance). */
-  updateLod(x: number, y: number, z: number): void;
-  dispose(): void;
-}
-
 /** The variety a tree is grown as, from its seed. */
 export const varietyOf = (tree: { readonly seed: number }, varieties: number): number => Math.min(varieties - 1, Math.floor(tree.seed * varieties));
 
-/** How many of these trees (or places a tree may stand, by seed) each variety of the kit takes: the room a forest built for them needs. */
-function forestRoom(trees: readonly { readonly seed: number }[], kit: NatureTreeKit): number[] {
-  const room = kit.variants.map(() => 0);
-  for (const tree of trees) room[varietyOf(tree, room.length)]!++;
-  return room;
-}
-
 /** A cell of the stand grid as one number (a string key per tree and neighbour was most of the cost). */
 const standKey = (cx: number, cy: number): number => cx * 100_003 + cy;
-
-/** How each tree stands among its neighbours: how crowded it is */
-function stands(trees: readonly TreePlacement[]): { crowd: Float32Array; openX: Float32Array; openY: Float32Array } {
-  return standsAmong(trees, trees);
-}
 
 /** How each of `trees` stands among `among` (which holds them, and every tree within `STAND_REACH` of one of them) */
 export function standsAmong(trees: readonly TreePlacement[], among: readonly TreePlacement[]): { crowd: Float32Array; openX: Float32Array; openY: Float32Array } {
@@ -155,92 +126,4 @@ export function treeColourInto(item: TreePlacement, col: { [i: number]: number }
   col[o] = t * (1 + hue * 0.16);
   col[o + 1] = t;
   col[o + 2] = t * (0.96 - hue * 0.12);
-}
-
-/** The trees, instanced per variety: one mesh each, the whole model at every distance. */
-export function buildNatureForest(trees: readonly TreePlacement[], kit: NatureTreeKit, room: readonly number[] = forestRoom(trees, kit)): NatureForest {
-  const varieties = kit.variants.length;
-  const meshes: InstancedMesh[] = [];
-  interface Group {
-    readonly mesh: InstancedMesh;
-    /** The variety's foliage cards: the same instances, written with the body's. */
-    readonly cards: InstancedMesh | null;
-    readonly capacity: number;
-    count: number;
-  }
-  const groups: (Group | null)[] = kit.variants.map((variant, k) => {
-    const capacity = Math.max(0, Math.floor(room[k] ?? 0));
-    if (capacity === 0) return null;
-    const mesh = new InstancedMesh(variant.levels[0], kit.material, capacity);
-    mesh.name = `nature-tree-${TREE_MODELS[k] ?? k}-${k}`;
-    mesh.castShadow = true;
-    mesh.customDepthMaterial = kit.depth;
-    // The upper leaves shading the lower is what gives a crown its depth.
-    mesh.receiveShadow = true;
-    mesh.frustumCulled = false;
-    // The tint per tree from the start: the program is built once with it.
-    mesh.instanceColor = new InstancedBufferAttribute(new Float32Array(capacity * 3).fill(1), 3);
-    mesh.count = 0;
-    meshes.push(mesh);
-    let cards: InstancedMesh | null = null;
-    if (variant.cards) {
-      cards = new InstancedMesh(variant.cards, kit.cardMaterial, capacity);
-      cards.name = `nature-tree-${TREE_MODELS[k] ?? k}-${k}-cards`;
-      // The crown's heart throws the tree's shadow; alpha-cut cards in the shadow pass cost far more than they add.
-      cards.castShadow = TREE_MODELS[k] === 'palm';
-      cards.customDepthMaterial = kit.cardDepth;
-      cards.receiveShadow = false;
-      cards.frustumCulled = false;
-      // The same buffers as the body: one write places both.
-      cards.instanceMatrix = mesh.instanceMatrix;
-      cards.instanceColor = mesh.instanceColor;
-      cards.count = 0;
-      meshes.push(cards);
-    }
-    return { mesh, cards, capacity, count: 0 };
-  });
-
-  const place = (list: readonly TreePlacement[]): boolean => {
-    const byVariety: number[][] = kit.variants.map(() => []);
-    list.forEach((tree, i) => byVariety[varietyOf(tree, varieties)]!.push(i));
-    if (byVariety.some((indices, k) => indices.length > (groups[k]?.capacity ?? 0))) return false;
-    const stand = stands(list);
-    groups.forEach((g, k) => {
-      if (!g) return;
-      const indices = byVariety[k]!;
-      const m = g.mesh.instanceMatrix.array as Float32Array;
-      const col = g.mesh.instanceColor!.array as Float32Array;
-      indices.forEach((i, slot) => {
-        const item = list[i]!;
-        treeMatrixInto(item, stand.crowd[i]!, stand.openX[i]!, stand.openY[i]!, m, slot * 16);
-        treeColourInto(item, col, slot * 3);
-      });
-      g.count = indices.length;
-      g.mesh.count = g.count;
-      if (g.cards) g.cards.count = g.count;
-      // Only the instances drawn go to the GPU (`addUpdateRange`).
-      if (g.count === 0) return;
-      g.mesh.instanceMatrix.clearUpdateRanges();
-      g.mesh.instanceMatrix.addUpdateRange(0, g.count * 16);
-      g.mesh.instanceMatrix.needsUpdate = true;
-      g.mesh.instanceColor!.clearUpdateRanges();
-      g.mesh.instanceColor!.addUpdateRange(0, g.count * 3);
-      g.mesh.instanceColor!.needsUpdate = true;
-    });
-    return true;
-  };
-  place(trees);
-  let lastX = Infinity, lastY = Infinity, lastZ = Infinity;
-  return {
-    meshes,
-    update: place,
-    updateLod(x, y, z) {
-      // One model at every distance: nothing to sort as the camera moves.
-      if (Math.hypot(x - lastX, y - lastY, z - lastZ) < LOD_SLACK) return;
-      lastX = x; lastY = y; lastZ = z;
-    },
-    dispose() {
-      for (const mesh of meshes) mesh.dispose();
-    },
-  };
 }

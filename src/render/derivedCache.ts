@@ -76,6 +76,50 @@ export async function readDerivedAll<T>(prefix: string): Promise<Map<string, T>>
   });
 }
 
+/** The keys kept under `prefix`, without it: the store's index alone, none of the values (`getAllKeys`, MDN IDBObjectStore). */
+export async function readDerivedKeys(prefix: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const db = await database();
+  if (!db) return out;
+  return new Promise((resolve) => {
+    try {
+      const request = db.transaction(STORE, 'readonly').objectStore(STORE).getAllKeys(prefixRange(prefix));
+      request.onsuccess = () => {
+        for (const key of request.result) out.add(String(key).slice(prefix.length));
+        resolve(out);
+      };
+      request.onerror = () => resolve(out);
+    } catch (error) {
+      console.warn('[derived] the kept keys could not be read; what they hold is made again', error);
+      resolve(out);
+    }
+  });
+}
+
+/** These entries (each `prefix` + key), in one read-only transaction: a key no longer kept is left out. */
+export async function readDerivedMany<T>(prefix: string, keys: readonly string[]): Promise<Map<string, T>> {
+  const out = new Map<string, T>();
+  const db = await database();
+  if (!db || !keys.length) return out;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(STORE, 'readonly');
+      const store = tx.objectStore(STORE);
+      for (const key of keys) {
+        const request = store.get(`${prefix}${key}`);
+        request.onsuccess = () => { if (request.result !== undefined) out.set(key, request.result as T); };
+        request.onerror = (event) => event.preventDefault();
+      }
+      tx.oncomplete = () => resolve(out);
+      tx.onabort = () => resolve(out);
+      tx.onerror = () => resolve(out);
+    } catch (error) {
+      console.warn('[derived] the kept entries could not be read; they are made again', error);
+      resolve(out);
+    }
+  });
+}
+
 /** Keeps a value under `key`. */
 async function keepDerived(key: string, value: unknown): Promise<void> {
   const db = await database();
